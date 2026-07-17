@@ -1,6 +1,6 @@
 # Noetra — Engineering Intelligence Platform
 
-> Working name: **Noetra** (rename freely). A SaaS product that connects to a GitHub
+> Working name: **Noetra** . A SaaS product that connects to a GitHub
 > repository, indexes it in the background, and lets you *talk to and search* the
 > codebase through an AI agent that answers with exact file + line citations.
 
@@ -9,7 +9,7 @@ relevant file from `docs/` for detail.
 
 ---
 
-## What we're building (one line)
+## What we're building
 
 Point Noetra at a repo → it clones, parses, and indexes the codebase → the user gets an
 AI agent they can ask questions of and search in plain English, grounded in the real
@@ -45,6 +45,14 @@ pointer versus when they're fine alone.
 - Walk real tradeoffs instead of asserting the answer
 - Flag explicitly when something is a good interview talking point — a line like
   "this is worth being able to explain if asked" is enough
+
+**Every command, tool, or config choice gets this before or alongside execution:**
+- The core reason we're doing it *this way* (1-3 sentences, not a lecture)
+- A link to the official docs for it, so it can be looked up independently later
+  (Docker docs, FastAPI docs, a library's README, etc.)
+- This applies to shell commands too, not just code — if a command's purpose or flags
+  aren't self-evident, say what it does before running it.
+- Keep it tight: core idea + reason + doc link. No need to over-explain past that.
 
 **After each milestone**, append a short entry to `docs/LEARNING_LOG.md`: what was
 built, the core concept(s), and a 2-3 sentence recruiter-ready explanation.
