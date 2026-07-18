@@ -6,7 +6,7 @@ host during dev — choose per component.
 ## Prerequisites
 
 - Docker + Docker Compose
-- Python 3.11+ with `uv` (or Poetry) — backend
+- Python 3.11+ with `uv`  — backend
 - Node 20+ with pnpm — frontend
 - A GitHub OAuth app (Client ID + Secret)
 - API keys: Anthropic (chat/summaries); embedding provider TBD
