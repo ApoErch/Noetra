@@ -7,6 +7,7 @@ from alembic import context
 
 from core.config import get_settings
 from core.db import Base
+from core import models  # noqa: F401 — import registers models on Base.metadata
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
