@@ -37,6 +37,15 @@ grounded in (e.g. "per `docs/WORKFLOW.md`"); link the **official** docs for any
 tool/library/CLI flag involved (Docker docs, FastAPI docs, Celery docs — not
 tutorials/blogs). Keep it tight: idea + reason + link, nothing more.
 
+**Explaining also means teaching system design, not just this codebase:** for every
+architectural decision, connect it to the general principle behind it — name the
+broader pattern (e.g. "this is the outbox pattern," "this is a fan-out/fan-in job"),
+state what alternatives existed and why they lose here, and note where else in
+industry this same trade-off shows up. The goal isn't just understanding *this*
+choice — it's building a transferable mental model I can apply to a different system
+later. When a decision is a good example of a classic trade-off (consistency vs.
+availability, latency vs. throughput, coupling vs. duplication), say so explicitly.
+
 **After each milestone:** append an entry to `docs/LEARNING_LOG.md` — what was built,
 core concept(s), 2-3 sentence recruiter-ready explanation.
 
