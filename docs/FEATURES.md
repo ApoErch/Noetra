@@ -8,7 +8,7 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
 - Repo list pulled live from the GitHub API for import selection.
 
 ## 2. Import
-- Three sources: public GitHub URL, private repo via OAuth, ZIP upload.
+- Two sources: public GitHub URL, private repo via OAuth.
 - Creates `repository(status=queued)` and enqueues a Celery indexing job.
 - UI shows live indexing status/progress until `ready`.
 

@@ -9,7 +9,7 @@ Login (GitHub OAuth)
 Dashboard ── my repositories / recent analyses
       │
       ▼
-Import repository ── public URL │ private (OAuth) │ ZIP upload
+Import repository ── public URL │ private (OAuth)
       │
       ▼
 Background indexing  (async — user sees live status)
@@ -25,7 +25,7 @@ Repository dashboard
 ```
 
 1. **Login** — GitHub OAuth; fetch the user's repo list via the GitHub API.
-2. **Import** — user picks a repo (or uploads a ZIP). API creates `Repository`
+2. **Import** — user picks a repo. API creates `Repository`
    (`status=queued`) and enqueues a Celery job. Response is immediate.
 3. **Indexing** — runs in the worker (below); UI shows progress by stage.
 4. **Explore** — once `status=ready`, chat, search, and metrics unlock.
@@ -39,7 +39,7 @@ progress so the UI reflects it live.
 queued
   │
   ▼
-cloning        git clone (or unzip upload) into worker storage
+cloning        git clone into worker storage
   │
   ▼
 parsing        walk every py/js/ts file; Tree-sitter per language
@@ -64,7 +64,7 @@ On any failure: `status=failed`, store the error, surface a retry action.
 
 ## Stage responsibilities
 
-- **cloning** — `core/github`. Shallow clone where possible. ZIP path skips git.
+- **cloning** — `core/github`. Shallow clone where possible.
 - **parsing** — `indexer`. One extractor per language (py/js/ts) via Tree-sitter.
   Produces plain structured data → files + `code_entity` rows (the symbol table).
 - **chunking** — `indexer`. Chunk by AST node; each chunk keeps file, line range, and
