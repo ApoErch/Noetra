@@ -100,3 +100,41 @@ OAuth Apps vs. GitHub Apps — worth naming explicitly rather than treating as a
 oversight.
 
 **Docs:** [OAuth Apps: scopes](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps) · [GitHub Apps vs OAuth Apps](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/differences-between-github-apps-and-oauth-apps)
+
+---
+
+## Signed session cookies (Starlette `SessionMiddleware` / `itsdangerous`)
+
+**What it is:** after login, the server needs a way to recognize "this request came
+from the same browser that just logged in" — HTTP itself has no memory between
+requests. The fix: the server puts a small dict (just `{"user_id": "<uuid>"}`) in a
+cookie, and *signs* it with a secret (`session_secret`) so the browser can hold it and
+send it back, but can't tamper with it undetected.
+
+**Signed, not encrypted — the distinction matters:** signing proves the cookie wasn't
+edited (any change breaks the signature check); it does *not* hide the contents from
+the browser. That's fine here because `user_id` isn't sensitive — you already know your
+own ID. Contrast with the GitHub access token (see Fernet entry above), which *is*
+encrypted, because that value must stay hidden even from the browser holding the
+session.
+
+**Why we need it here:** without it, every request would need to redo the full GitHub
+OAuth flow to prove identity. The signed cookie is the "remember me" mechanism between
+login and logout.
+
+**How it's used in Noetra:**
+- `SessionMiddleware` is registered in `backend/api/main.py` with
+  `secret_key=settings.session_secret`.
+- `auth.py`'s callback handler sets `request.session["user_id"] = str(user.id)` after a
+  successful GitHub login.
+- `get_current_user` (a FastAPI dependency) reads `request.session["user_id"]` back out
+  on every subsequent request, loads the matching `User` row from Postgres, and 401s if
+  it's missing.
+- Logout is just `request.session.clear()`.
+
+**Is this standard?** Yes — this is the standard signed-cookie session pattern, the
+same family of idea as JWTs (also signed-not-encrypted) just a different format/library.
+Common in small-to-mid apps that don't need a server-side session store (Redis, DB
+table) — the cookie itself carries the state.
+
+**Docs:** [Starlette SessionMiddleware](https://www.starlette.io/middleware/#sessionmiddleware) · [itsdangerous](https://itsdangerous.palletsprojects.com/)
