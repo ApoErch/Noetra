@@ -67,4 +67,46 @@ host's.
 
 ---
 
+## Milestone 2 — Auth
+
+**Built:** Full GitHub OAuth login flow, verified end-to-end against real GitHub: a
+dev OAuth App, `core/github.py` (authorize-URL builder, code→token exchange, profile
+fetch), `core/security.py` (Fernet encryption for the stored token), `api/auth.py`
+(`/login`, `/callback`, `/logout`, `/me`, plus a reusable `get_current_user`
+dependency), and signed cookie sessions via Starlette's `SessionMiddleware`. Confirmed
+a real `User` row lands in Postgres with a genuinely encrypted `access_token`.
+
+**Core concept(s):** the OAuth2 Authorization Code flow (redirect → user approves on
+GitHub → one-time `code` → server-side exchange for a token — the code never touches
+the browser's URL bar for anything sensitive). CSRF protection via a random `state`
+value round-tripped through the session. Stateless signed-cookie sessions
+(`itsdangerous`) instead of a server-side session table — the session data lives in
+the client's cookie, tamper-evident via a signature, so `api` stays stateless.
+Symmetric encryption (Fernet/AES) for a *reversible* secret (need the token back to
+call GitHub later) as distinct from password hashing (one-way, never need it back).
+
+**Recruiter-ready explanation:** Logging in redirects the user to GitHub, which asks
+them to approve access and sends them back with a short-lived, single-use code. The
+backend exchanges that code server-to-server (using a client secret only the backend
+knows) for a real access token — the token itself never appears in the browser or the
+URL. That token is encrypted before it's stored in Postgres, because it's a live
+credential that can act on the user's GitHub account; if the database ever leaked, an
+unencrypted token would be as dangerous as a leaked password, except you can't hash it
+the way you hash passwords, since the app needs the real value back later to call
+GitHub's API. Once logged in, "being logged in" is represented by a small signed
+cookie holding the user's ID rather than a row in a sessions table — the server can
+trust the cookie wasn't tampered with because it's cryptographically signed, so no
+extra database lookup or shared session store is needed on every request.
+
+**Tricky part:** GitHub's REST API silently returns `503` (not a clear `401`/`403`)
+for authenticated requests missing a `User-Agent` header — traced by comparing an
+unauthenticated request (worked, `401`) against the authenticated one (`503`) from
+inside the running container, then confirming against GitHub's own REST API docs that
+`User-Agent` is a hard requirement on every request. Also hit the classic-OAuth-App
+limitation that private-repo access has no read-only scope — only the broad `repo`
+scope exists, which grants read+write; true read-only permissions require a GitHub
+App instead, a bigger integration change deferred rather than taken on here.
+
+---
+
 <!-- Add new entries above this line, most recent last -->

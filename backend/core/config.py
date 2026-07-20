@@ -13,12 +13,14 @@ class Settings(BaseSettings):
     github_client_id: str = ""
     github_client_secret: str = ""
     github_oauth_callback: str = "http://localhost:8000/api/v1/auth/callback"
+    frontend_url: str = "http://localhost:5173"
 
     anthropic_api_key: str = ""
     embedding_provider: str = ""
     embedding_api_key: str = ""
 
     session_secret: str = ""
+    token_encryption_key: str = ""
     clone_storage_dir: str = "/data/repos"
 
 

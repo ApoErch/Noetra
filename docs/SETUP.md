@@ -45,6 +45,7 @@ EMBEDDING_PROVIDER=            # TBD — set when the model is chosen
 EMBEDDING_API_KEY=
 # app
 SESSION_SECRET=
+TOKEN_ENCRYPTION_KEY=          # Fernet key: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 CLONE_STORAGE_DIR=/data/repos  # where the worker clones repos
 ```
 
