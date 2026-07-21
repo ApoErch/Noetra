@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -57,3 +57,20 @@ class Repository(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class File(Base):
+    """A single tracked file from a cloned repo: its path, raw content (if text), and a hash for re-index skipping."""
+
+    __tablename__ = "files"
+    __table_args__ = (UniqueConstraint("repository_id", "path", name="uq_files_repository_id_path"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), index=True
+    )
+    path: Mapped[str] = mapped_column(String)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_binary: Mapped[bool] = mapped_column(Boolean, default=False)
+    content_hash: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
