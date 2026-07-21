@@ -17,11 +17,12 @@ decisions made (and the one-line why), any blockers, and the obvious next step.
 
 ## 2. Update `docs/SESSION_LOG.md` (create it if missing)
 
-Get today's date with `date +%F`. **Append** a new entry at the end (most recent last),
-in this format. Only the core — enough for a fresh session to pick up cold:
+Get the current local date and time with `date "+%F %H:%M"`. **Append** a new entry at
+the end (most recent last), in this format. Only the core — enough for a fresh session
+to pick up cold:
 
 ```
-## Session — YYYY-MM-DD
+## Session — YYYY-MM-DD HH:MM
 
 **Worked on:** milestone / feature.
 **Done:** what now works (bullets).

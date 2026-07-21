@@ -237,3 +237,45 @@ action uses internally to authenticate clones in CI without leaving a token behi
 the checked-out repo.
 
 **Docs:** [git-config: `http.extraHeader`](https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpextraHeader)
+
+---
+
+## Correction: `git clone -c ...` is *not* purely process-local
+
+**The earlier claim (now known wrong):** the entry above says a `-c` flag "applies only to that single command and is never persisted to disk." That's true for most git commands, but **not** for `git clone`. Verified by hand this session: after `git clone -c http.extraHeader="Authorization: Basic ..." <url> dest`, `cat dest/.git/config` showed the header sitting right there under `[http]` — same leak as putting the token in the URL, just reached a different way.
+
+**Why `git clone` is special:** cloning has to persist *some* settings into the new repo's config anyway (the remote URL, the default branch tracking) so future `git fetch`/`git pull` work without re-specifying everything. Git's implementation carries certain `-c` overrides — including `http.*` ones — into that same saved config, on the assumption you'd want later fetches to keep using the same settings. Reasonable default for e.g. `http.postBuffer`, actively dangerous for a bearer credential.
+
+**The real fix:** treat the clone as producing a config that needs a cleanup pass — run `git config --unset-all http.extraHeader` inside the destination immediately after a successful clone. The token still never touches the clone *URL* (so it's never in shell history / process argv longer than necessary) and now never survives on disk past the clone step either.
+
+**Lesson generalized:** "`-c` is a one-off override" is a per-*command* guarantee, not a blanket git guarantee — worth verifying empirically (`cat .git/config` after the fact) rather than trusting the general rule for a specific command you haven't checked.
+
+**Docs:** [git-clone docs](https://git-scm.com/docs/git-clone) (see the note on `-c`/`--config` under OPTIONS)
+
+---
+
+## GitHub has two different auth surfaces: REST API (`Bearer`) vs. git-over-HTTPS (`Basic`)
+
+**The mistake:** authenticated `git clone` with `-c http.extraHeader="Authorization: Bearer <token>"` — reasonable guess, since `Bearer` is what `core/github.py` already uses successfully against `https://api.github.com`. It failed with `fatal: could not read Username for 'https://github.com'`, as if no credentials had been sent at all.
+
+**What's actually going on:** `github.com`'s REST/GraphQL API and its git wire-protocol server (the thing `git clone`/`fetch`/`push` actually talk to) are different pieces of infrastructure with different, unrelated auth conventions. The git server predates the `Bearer` scheme's use here and only recognizes standard **HTTP Basic Authentication** — the same mechanism you'd get "for free" by embedding credentials in the clone URL (`https://<token>@github.com/...`); git converts that into a Basic header internally before sending it. A `Bearer` header is simply not a scheme the git server checks for, so it behaves as if the request were anonymous.
+
+**How it's used in Noetra:** `worker/tasks.py` builds `Authorization: Basic <base64("x-access-token:" + token)>` for the clone specifically, while `core/github.py` keeps using `Authorization: Bearer <token>` for REST calls (`/user`) — same token, two different header formats, because the two servers being called expect different things.
+
+**Is this standard?** Yes — this is a real, commonly-hit GitHub gotcha, not a Noetra-specific quirk. It's the same reason `git`'s own credential helpers and CI tools (e.g. `actions/checkout`) always construct Basic auth for clone operations regardless of what a REST client would use.
+
+**Docs:** [Git Book — Basic Authentication over Smart HTTP](https://git-scm.com/book/en/v2/Git-on-the-Server-Smart-HTTP)
+
+---
+
+## `sys.path` isn't the same for every way of starting Python
+
+**The confusion:** the `api` service could already `import core` and `import api` just fine (via `uv run uvicorn api.main:app`), so it seemed safe to assume the `worker` service (`uv run celery -A core.celery_app worker`) could too. It couldn't — it crashed on startup with `ModuleNotFoundError: No module named 'worker'`, despite the exact same working directory (`/backend`) and the exact same file actually being present on disk.
+
+**What's actually going on:** Python decides what folders are importable (`sys.path`) partly based on *how* the process was started, not just the working directory. Running `python -c "..."` (or `python -m x`) auto-adds the current directory. But both `uvicorn` and `celery` here are started as **installed console-script entry points** (`.venv/bin/uvicorn`, `.venv/bin/celery`), and by default that does *not* add the working directory. `uvicorn` happens to special-case this — it explicitly inserts the cwd into `sys.path` itself when resolving a dotted app string like `api.main:app`, as a deliberate convenience feature. `celery` has no equivalent special-casing for its `autodiscover_tasks(["worker"])` call, so it just failed the plain `import worker`.
+
+**The fix:** don't rely on one tool's incidental convenience behavior — set `PYTHONPATH=/backend` explicitly as an environment variable on both services in `docker-compose.yml`, so importability doesn't depend on which CLI tool happens to be generous about it.
+
+**Is this standard?** Yes — `PYTHONPATH` is the standard, explicit way to guarantee a directory is importable regardless of entry point; relying on a specific tool's internal convenience logic (as the `api` service was doing, unknowingly) is fragile precisely because it isn't documented behavior you can count on from every tool.
+
+**Docs:** [Python docs — `sys.path` initialization](https://docs.python.org/3/library/sys.path_init.html)

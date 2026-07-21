@@ -36,3 +36,23 @@ Most recent entry last. Written by `/endsession`.
 - `celery_app` lives in `core/` so both `api` (producer) and `worker` (consumer) can import it without `api` reaching into `worker`.
 **Next step:** Build `worker/tasks.py::clone_repository` — clone into `/data/repos/{id}` using `http.extraHeader` token injection, update `status` through `cloning → ready|failed`, write `error_message` on failure.
 **Watch out for:** Nothing blocking. The forged-cookie test trick (sign `{"user_id": ...}` with `itsdangerous.TimestampSigner` using `session_secret`) is handy for future endpoint testing without repeating the browser OAuth flow.
+
+---
+
+## Session — 2026-07-21 (continued)
+
+**Worked on:** Finished Milestone 3 (Import + clone) — built, debugged, and verified `clone_repository`. Scoped (not built) the frontend login flow.
+**Done:**
+- Built `worker/tasks.py::clone_repository`: loads the `Repository` + owning `User`, decrypts the token, shallow-clones (`--depth 1`) into `clone_storage_dir`, moves status `queued → cloning → ready|failed` with `error_message` set on failure.
+- Fixed a worker startup crash: `celery -A core.celery_app worker` never put `/backend` on `sys.path` (unlike `uvicorn`, which does this implicitly) — added explicit `PYTHONPATH=/backend` to both `api` and `worker` in `docker-compose.yml`.
+- Fixed a clone auth failure: GitHub's git-over-HTTPS server only accepts HTTP **Basic** auth, not `Bearer` (that's only for the REST/GraphQL API) — task now builds `Authorization: Basic base64("x-access-token:<token>")`.
+- Discovered `git clone -c http.extraHeader=...` persists that header into the new repo's `.git/config` (git clone specifically copies `-c http.*` settings into the clone, unlike most other git commands) — added `git config --unset-all http.extraHeader` right after a successful clone to close that leak.
+- Verified end-to-end via the forged-cookie trick: happy path (`octocat/Hello-World`) → `ready`, files on disk, `.git/config` clean of any token; failure path (nonexistent repo) → `failed` with GitHub's real error text captured.
+- Scoped the frontend login flow (not yet built): add CORS middleware to `main.py`, add `@tanstack/react-query` to `web/package.json`, wire a login button (full-page redirect to `/api/v1/auth/login`) + `/me` check + logout into `App.tsx`.
+**In progress:** Frontend login flow — planned only, zero code written. `web/src/App.tsx` is still the default Vite scaffold.
+**Key decisions:**
+- Basic auth, not Bearer, for git clone authentication — GitHub's git wire-protocol server only understands Basic.
+- Always strip `http.extraHeader` from `.git/config` right after cloning — `-c` on `git clone` isn't purely process-local the way it is on most git commands.
+- Explicit `PYTHONPATH=/backend` on both backend services — don't rely on incidental per-tool behavior for basic importability.
+**Next step:** Build the frontend login flow (CORS + TanStack Query + login/me/logout in `App.tsx`), then decide between Milestone 4 (Parse + extract) or a minimal repo-list UI next.
+**Watch out for:** `status = READY` after `clone_repository` currently just means "cloned," not "fully indexed" — once Milestone 4+ exist this needs to become an intermediate state, not terminal. The `docs/CONCEPTS.md` entry "Git credential injection via `http.extraHeader`" from the prior session is now partly inaccurate (claims `-c` is never persisted) — a correction was appended as a new entry rather than editing the original.
