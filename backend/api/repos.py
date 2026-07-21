@@ -12,11 +12,14 @@ router = APIRouter(prefix="/api/v1/repos", tags=["repos"])
 
 
 class RepositoryCreate(BaseModel):
+    """Request body for importing a repo: just the GitHub URL, validated at the API boundary."""
+
     github_url: str
 
     @field_validator("github_url")
     @classmethod
     def validate_github_url(cls, value: str) -> str:
+        """Reject anything that isn't a github.com/owner/repo URL, and strip any trailing slash."""
         parse_repo_slug(value)
         return value.rstrip("/")
 
@@ -27,6 +30,7 @@ def create_repository(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
+    """Import a repo for the user: reject duplicates, persist it as `queued`, then enqueue the background clone/index job."""
     existing = (
         db.query(Repository)
         .filter(Repository.user_id == user.id, Repository.github_url == payload.github_url)

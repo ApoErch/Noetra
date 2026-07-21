@@ -11,6 +11,8 @@ from core.db import Base
 
 
 class User(Base):
+    """A logged-in GitHub user who owns imported repositories; holds their encrypted access token."""
+
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -22,6 +24,8 @@ class User(Base):
 
 
 class RepositoryStatus(str, enum.Enum):
+    """The stages of the indexing pipeline a repo moves through, from `queued` to `ready` (or `failed`)."""
+
     QUEUED = "queued"
     CLONING = "cloning"
     PARSING = "parsing"
@@ -34,6 +38,8 @@ class RepositoryStatus(str, enum.Enum):
 
 
 class Repository(Base):
+    """A GitHub repo a user imported, plus its current indexing status and any failure message."""
+
     __tablename__ = "repositories"
     __table_args__ = (UniqueConstraint("user_id", "github_url", name="uq_repositories_user_id_github_url"),)
 

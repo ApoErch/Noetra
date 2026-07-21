@@ -29,12 +29,15 @@ USER_AGENT = "Noetra"
 
 @dataclass
 class GithubProfile:
+    """The subset of a GitHub user we care about: their stable id, username, and avatar."""
+
     github_id: int
     username: str
     avatar_url: str | None
 
 
 def build_authorize_url(state: str) -> str:
+    """Build the GitHub consent URL we redirect the user to, carrying our client id, callback, scopes, and CSRF state."""
     settings = get_settings()
     params = {
         "client_id": settings.github_client_id,
@@ -47,6 +50,7 @@ def build_authorize_url(state: str) -> str:
 
 
 def exchange_code_for_token(code: str) -> str:
+    """Trade the one-time OAuth `code` GitHub handed back for a durable access token."""
     settings = get_settings()
     response = httpx.post(
         TOKEN_URL,
@@ -67,6 +71,7 @@ def exchange_code_for_token(code: str) -> str:
 
 
 def fetch_github_profile(access_token: str) -> GithubProfile:
+    """Call GitHub's /user endpoint with the token to read the authenticated user's profile."""
     response = httpx.get(
         USER_URL,
         headers={

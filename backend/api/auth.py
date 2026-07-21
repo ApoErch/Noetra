@@ -15,6 +15,7 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 @router.get("/login")
 def login(request: Request) -> RedirectResponse:
+    """Start GitHub OAuth: mint a CSRF `state`, save it in the session, and redirect to GitHub's consent screen."""
     state = secrets.token_urlsafe(32)
     request.session["oauth_state"] = state
     return RedirectResponse(build_authorize_url(state))
@@ -22,6 +23,7 @@ def login(request: Request) -> RedirectResponse:
 
 @router.get("/callback")
 def callback(request: Request, code: str, state: str, db: Session = Depends(get_db)) -> RedirectResponse:
+    """Handle GitHub's post-consent redirect: verify `state`, swap the code for a token, upsert the user, and log them in."""
     expected_state = request.session.pop("oauth_state", None)
     if not expected_state or not secrets.compare_digest(expected_state, state):
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
@@ -51,11 +53,13 @@ def callback(request: Request, code: str, state: str, db: Session = Depends(get_
 
 @router.post("/logout")
 def logout(request: Request) -> dict[str, str]:
+    """Clear the session cookie, ending the user's login."""
     request.session.clear()
     return {"status": "ok"}
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    """FastAPI dependency: resolve the logged-in `User` from the session cookie, or raise 401 if not authenticated."""
     user_id = request.session.get("user_id")
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -67,6 +71,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
 @router.get("/me")
 def me(user: User = Depends(get_current_user)) -> dict[str, str | None]:
+    """Return the current user's public profile (id, github id, username, avatar)."""
     return {
         "id": str(user.id),
         "github_id": str(user.github_id),

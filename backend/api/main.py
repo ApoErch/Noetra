@@ -13,4 +13,5 @@ app.include_router(repos_router)
 
 @app.get("/api/v1/health")
 def health() -> dict[str, str]:
+    """Liveness probe: returns ok so infra (and the frontend) can confirm the API is up."""
     return {"status": "ok"}

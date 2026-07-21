@@ -4,6 +4,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """All runtime configuration (DB, Redis, OAuth, secrets), loaded from environment variables / `.env`."""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+psycopg://noetra:noetra@localhost:5432/noetra"
@@ -26,4 +28,5 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """Return a cached singleton `Settings` so the environment is parsed only once per process."""
     return Settings()
