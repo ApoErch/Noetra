@@ -35,9 +35,11 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/db`. Everything scoped by
 | id | uuid (pk) | |
 | repository_id | uuid (fk) | |
 | path | text | repo-relative |
-| language | enum | `python\|javascript\|typescript` |
+| language | enum, nullable | `python\|javascript\|typescript`; null for non-parsed files (e.g. `.md`, `.json`) |
+| content | text, nullable | full raw file source; populated at clone time for every tracked file (`git ls-files`), not just py/js/ts |
+| is_binary | boolean | true for images/compiled assets/etc — `content` stays null, file endpoint returns "can't preview this" instead of dumping binary into a TEXT column |
 | content_hash | text | incremental re-index |
-| loc | int | lines of code |
+| loc | int, nullable | lines of code; only set for parsed languages |
 
 ### code_entity  *(the symbol table — powers structural retrieval)*
 | field | type | notes |

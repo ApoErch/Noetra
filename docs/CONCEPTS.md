@@ -279,3 +279,21 @@ the checked-out repo.
 **Is this standard?** Yes — `PYTHONPATH` is the standard, explicit way to guarantee a directory is importable regardless of entry point; relying on a specific tool's internal convenience logic (as the `api` service was doing, unknowingly) is fragile precisely because it isn't documented behavior you can count on from every tool.
 
 **Docs:** [Python docs — `sys.path` initialization](https://docs.python.org/3/library/sys.path_init.html)
+
+---
+
+## App logout vs. IdP logout (federated / RP-initiated logout)
+
+**The question that came up:** after clicking "log out" in Noetra, then "log in" again in the same browser, GitHub skipped straight past its login/consent screen and logged the user right back in. Shouldn't logout have logged them out of GitHub too?
+
+**The distinction:** GitHub here is the **identity provider (IdP)** — the party that actually verifies who you are. Noetra is the **relying party (RP)** — it just trusts GitHub's answer. `request.session.clear()` (Noetra's logout) only ends the *local* session between the browser and Noetra. It has no effect on the browser's separate github.com login cookie, or on GitHub's record that you already consented to the "Noetra" OAuth app's scopes — both of those live entirely on GitHub's side.
+
+**Why this is correct, not a bug:** if logging out of one small app also logged you out of github.com (and by extension every other app using "Sign in with GitHub" in that browser), that would be surprising and disruptive — the same reason logging out of a random site doesn't log you out of Gmail after "Sign in with Google." Local logout and IdP logout are supposed to be independent.
+
+**Why there's no way to force it here:** plain OAuth 2.0 (what GitHub implements) is only an authorization protocol — it has no "logout" concept at all. **OpenID Connect** (an identity layer built on top of OAuth) adds an optional `end_session_endpoint` for exactly this, called RP-initiated logout / federated sign-out — but GitHub doesn't implement OIDC, so no such endpoint exists to call.
+
+**The closest available thing (different, not equivalent):** GitHub does expose `DELETE /applications/{client_id}/token` to revoke the OAuth app's access token. That forces the consent screen to reappear next login (since access was revoked) — but it still doesn't touch the github.com session itself, and Noetra doesn't currently call it (would mean re-consenting on every login, not worth it for V1).
+
+**Is this standard?** Yes — this is how essentially every "Sign in with X" integration behaves (Google, Facebook, GitHub, etc.).
+
+**Docs:** [GitHub OAuth Apps — scopes & token revocation](https://docs.github.com/en/rest/apps/oauth-applications) · [OpenID Connect RP-Initiated Logout](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)

@@ -56,3 +56,17 @@ Most recent entry last. Written by `/endsession`.
 - Explicit `PYTHONPATH=/backend` on both backend services — don't rely on incidental per-tool behavior for basic importability.
 **Next step:** Build the frontend login flow (CORS + TanStack Query + login/me/logout in `App.tsx`), then decide between Milestone 4 (Parse + extract) or a minimal repo-list UI next.
 **Watch out for:** `status = READY` after `clone_repository` currently just means "cloned," not "fully indexed" — once Milestone 4+ exist this needs to become an intermediate state, not terminal. The `docs/CONCEPTS.md` entry "Git credential injection via `http.extraHeader`" from the prior session is now partly inaccurate (claims `-c` is never persisted) — a correction was appended as a new entry rather than editing the original.
+
+---
+
+## Session — 2026-07-21 19:57
+
+**Worked on:** QA of the frontend GitHub login flow (built in the prior session, still uncommitted). No new code written.
+**Done:**
+- Read through the uncommitted diff (CORS middleware in `main.py`, `web/src/lib/api.ts`, TanStack Query wiring in `App.tsx`/`main.tsx`) to get current with what had already been built.
+- Manually tested login/logout end to end via the browser (Chrome-in-Claude declined by user, so tested by hand): normal browser session skipped straight past GitHub's login/consent screen on re-login after logout; confirmed in an incognito window that this was GitHub reusing an existing `github.com` session + prior app consent, not a bug — the actual login/consent screen showed up as expected with no session state.
+- Explained why Noetra's logout doesn't (and shouldn't) log the user out of github.com — local session termination vs. federated/RP-initiated logout, and that GitHub's OAuth (non-OIDC) doesn't expose a logout endpoint at all.
+**In progress:** Nothing code-wise. Uncommitted diff from the prior session (frontend login flow) is confirmed working and ready to commit.
+**Key decisions:** None — QA/explanation only. Confirmed the existing logout behavior (clear local session cookie only) is correct as-is; no change needed.
+**Next step:** Commit the frontend login flow diff, then decide between Milestone 4 (Parse + extract) or a minimal repo-list UI.
+**Watch out for:** Nothing new. Chrome browser automation was declined by the user this session — future UI testing needs to be either manual or re-offered via `/chrome`.

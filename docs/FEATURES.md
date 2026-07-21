@@ -12,7 +12,16 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
 - Creates `repository(status=queued)` and enqueues a Celery indexing job.
 - UI shows live indexing status/progress until `ready`.
 
-## 3. AI Chat  *(primary feature)*
+## 3. File tree browser
+- Available as soon as `status` passes `cloning` — doesn't wait on parsing/chunking/embedding.
+- VS Code-style sidebar: nested tree built client-side from a flat list of `file.path`
+  (`GET /repos/{id}/files`, paths only, no content — cheap even at tens of thousands of files).
+- Click a file → lazy-fetch its content (`GET /repos/{id}/files/{file_id}`) and open in Monaco.
+  Binary files (`file.is_binary`) show a "can't preview this" state instead of content.
+- Entry point independent of search/chat citations — this is direct browsing, not just
+  jump-to-citation.
+
+## 4. AI Chat  *(primary feature)*
 - Natural-language questions: "Explain authentication", "Where is Redis used?",
   "How do payments work?"
 - **LangGraph agent** with retrieval tools (`code_search`, `find_symbol`, `read_file`,
@@ -22,12 +31,12 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
   agent (milestone 8). Same retriever underneath.
 - Optionally persists history in `chat_message`.
 
-## 4. Semantic / hybrid search
+## 5. Semantic / hybrid search
 - Replaces manual Ctrl+Shift+F. "where do we send emails?", "where is `createToken` defined?"
 - Hybrid retrieval: lexical + structural + semantic, RRF-fused (`RETRIEVAL.md`).
 - Ranked results with `file:line` + one-line context. Click → open in Monaco at that line.
 
-## 5. Repository dashboard  *(basic metrics only)*
+## 6. Repository dashboard  *(basic metrics only)*
 - Header counts: file count, function count, total LOC.
 - Language breakdown (python / js / ts).
 - Largest files.

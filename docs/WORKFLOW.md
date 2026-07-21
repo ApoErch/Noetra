@@ -19,6 +19,7 @@ Repository ready
       │
       ▼
 Repository dashboard
+   ├── File tree browser (unlocks right after cloning — no wait on parsing/embedding)
    ├── AI Chat (LangGraph agent)
    ├── Search (hybrid)
    └── Metrics (basic)
@@ -28,7 +29,9 @@ Repository dashboard
 2. **Import** — user picks a repo. API creates `Repository`
    (`status=queued`) and enqueues a Celery job. Response is immediate.
 3. **Indexing** — runs in the worker (below); UI shows progress by stage.
-4. **Explore** — once `status=ready`, chat, search, and metrics unlock.
+4. **Explore** — the file tree browser unlocks as soon as `status` passes `cloning`
+   (it only needs `file.path`/`content`, not the symbol table). Chat, search, and
+   metrics stay gated until `status=ready`.
 
 ## Indexing pipeline (the core of the product)
 
@@ -64,7 +67,10 @@ On any failure: `status=failed`, store the error, surface a retry action.
 
 ## Stage responsibilities
 
-- **cloning** — `core/github`. Shallow clone where possible.
+- **cloning** — `core/github`. Shallow clone where possible. Also enumerates every
+  tracked file (`git ls-files` — respects `.gitignore`) and writes a `file` row per
+  path with its raw `content` (or `is_binary=true` with no content), powering the
+  file tree browser independent of parsing.
 - **parsing** — `indexer`. One extractor per language (py/js/ts) via Tree-sitter.
   Produces plain structured data → files + `code_entity` rows (the symbol table).
 - **chunking** — `indexer`. Chunk by AST node; each chunk keeps file, line range, and
