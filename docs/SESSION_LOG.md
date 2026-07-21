@@ -70,3 +70,26 @@ Most recent entry last. Written by `/endsession`.
 **Key decisions:** None — QA/explanation only. Confirmed the existing logout behavior (clear local session cookie only) is correct as-is; no change needed.
 **Next step:** Commit the frontend login flow diff, then decide between Milestone 4 (Parse + extract) or a minimal repo-list UI.
 **Watch out for:** Nothing new. Chrome browser automation was declined by the user this session — future UI testing needs to be either manual or re-offered via `/chrome`.
+
+---
+
+## Session — 2026-07-22 02:00
+
+**Worked on:** Built the file tree browser (`docs/FEATURES.md` #3) end-to-end — backend `File` model/endpoints, frontend tree + Monaco viewer — then spent most of the session hardening `clone_repository` against real import failures found by testing against large real-world repos.
+**Done:**
+- Backend: `File` model + migration; `clone_repository` extended to walk `git ls-files` and persist `path`/`content`/`is_binary`/`content_hash` per file; `GET /repos/{id}/files` + `GET /repos/{id}/files/{file_id}`; `_get_owned_repository` ownership check (404, not 403 — avoids leaking which repo IDs exist). Added `GET /repos` (list), `POST /repos/{id}/retry`, `DELETE /repos/{id}` so failed imports have a real recovery path instead of being silent dead ends.
+- Frontend: `RepoList` (import/list/retry/remove), `FileTree` (recursive, collapsible), `FileViewer` (read-only Monaco), `RepoExplorer` shell, wired into `App.tsx`. Installed `@monaco-editor/react`. Reworked the whole app to an always-dark theme (dropped light mode) with a sidebar restyled after a GitHub-dark reference screenshot (blue folder icons, left-accent bar on the selected file).
+- **Import bugs found and fixed, all via testing against real large repos (`fbsamples/f8app`, the Linux kernel, TensorFlow):**
+  1. NUL bytes in file content crashed the bulk `INSERT` (Postgres rejects `\x00` in text columns). UTF-8 decoding alone doesn't catch this — NUL is valid UTF-8. Fixed by checking for `\x00` in raw bytes before attempting to decode.
+  2. That crash left the repo stuck at `status=cloning` forever with no visible error — `clone_repository` had no top-level exception handler. Fixed: the whole task is now wrapped in `try/except`, setting `status=failed` + `error_message` on any unexpected exception instead of hanging silently.
+  3. Symlinked paths pointing at directories (Linux kernel's `scripts/dtc/include-prefixes/*`) raised `IsADirectoryError` when read as a normal file. Fixed by reading the symlink's target itself (`Path.readlink()`) instead of following it — matches what git actually treats that path's tracked content as.
+  4. No timeout on `git clone`/`git ls-files` — a hang would occupy a worker slot forever. Added a 300s timeout; `subprocess.TimeoutExpired` is caught **separately** from the generic handler because its default string form embeds the full command list — including the Basic-auth header with the token in it — which must never land in `repo.error_message`.
+  5. No file-size guard — one huge file would load entirely into memory and bloat a single DB row. Added a 1MB per-file cap; oversized files are hashed in chunks (never loaded whole) and marked non-previewable instead of storing content.
+**In progress:** File tree browser is functionally complete and tested against several real repos (Hello-World, f8app, Linux kernel, TensorFlow, react-devtools). The always-dark theme/sidebar redesign is code-complete but not yet reviewed live in the browser — dev server was stopped before a final visual check.
+**Key decisions:**
+- File content lives in Postgres, not read from the shared Docker volume at request time — `api`/`worker` sharing a filesystem is a local-dev convenience that won't hold on a real cloud deploy, and DB storage avoids a path-traversal attack surface entirely.
+- Failed repos are never auto-deleted — kept with `error_message` visible, plus explicit Retry/Remove actions, matching `docs/WORKFLOW.md`'s "surface a retry action" spec.
+- Always-dark theme, no light mode — one deliberate palette instead of maintaining a light/dark split.
+- No total-repo-size cap added (only per-file) — deferred since nothing has actually broken on total size yet (TensorFlow imported fine); not fixing a problem that hasn't occurred.
+**Next step:** Live-review the always-dark theme + modernized sidebar in the browser. After that, likely Milestone 4 (Parse + extract via Tree-sitter) — the file tree browser was built ahead of the numbered milestone order, per `docs/FEATURES.md` #3's explicit note that it's independent of parsing.
+**Watch out for:** No repo-size cap exists yet — a truly enormous monorepo could still take a long time or fill disk; this is a deliberate deferral, not an oversight. `is_binary=True` is now overloaded to mean "not previewable" for three different reasons (actually binary, a symlink, or oversized) — fine for the current single "can't preview" placeholder, but worth remembering if a future feature needs to tell these cases apart.

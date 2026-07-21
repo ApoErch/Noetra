@@ -297,3 +297,108 @@ the checked-out repo.
 **Is this standard?** Yes — this is how essentially every "Sign in with X" integration behaves (Google, Facebook, GitHub, etc.).
 
 **Docs:** [GitHub OAuth Apps — scopes & token revocation](https://docs.github.com/en/rest/apps/oauth-applications) · [OpenID Connect RP-Initiated Logout](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)
+
+---
+
+## IDOR (Insecure Direct Object Reference) and the 404-vs-403 trick
+
+**What it is:** a very common web vulnerability class where an endpoint looks up a
+resource by an ID from the request (`/repos/{id}/files`) without checking whether the
+*current user* is actually allowed to see that ID. If the check is missing, any logged-in
+user can read any other user's data just by changing the ID in the URL/request.
+
+**Why we need it here:** `GET /repos/{id}/files` needs to return one user's repo data,
+never another user's, even though both are just rows in the same `repositories` table
+identified by UUID.
+
+**How it's used in Noetra:** `_get_owned_repository()` (`backend/api/repos.py`) folds the
+ownership check directly into the DB query — `WHERE id = :id AND user_id = :current_user`
+— instead of "look up by id, then separately check the owner." If no row matches either
+condition, it raises **404**, not 403. This is deliberate: a 403 ("forbidden") would leak
+that the ID *exists*, just isn't yours — letting an attacker map out valid IDs even
+without reading their contents. 404 makes "doesn't exist" and "exists but isn't yours"
+look identical from the outside (GitHub itself does the same thing for private repos).
+
+**Is this standard?** Yes — enforcing authorization inside the query itself (not as a
+separate check after fetching) is the standard fix for IDOR, and "404 over 403" for
+ownership failures is a known, deliberate pattern, not just a Noetra choice.
+
+**Docs:** [OWASP: Insecure Direct Object References](https://owasp.org/www-community/attacks/Insecure_Direct_Object_Reference)
+
+---
+
+## The client is never a trust boundary
+
+**The question that came up:** if the React UI never renders a button to fetch *another*
+user's repo, why does the API still need to check ownership on every request?
+
+**The answer:** the frontend and backend are two separate programs connected only by
+HTTP. The React app is just *one* possible caller of the API — nothing stops a request
+from being sent a different way: editing a request in the browser's Network tab and
+resending it, hitting the API directly with `curl`/Postman using a valid session cookie,
+or scripting a loop over IDs. A session cookie proves *who's asking*, not *what they're
+allowed to ask for* — that has to be re-checked by the server on every single request,
+regardless of what the UI happens to expose. Relying on "the button doesn't exist" as
+protection is called **security through obscurity**, and it's how most real IDOR bugs are
+actually found in practice — not through the app's own UI, but by directly editing a
+request the UI sent and seeing what comes back.
+
+**Is this standard?** Yes — "never trust the client" is one of the most repeated rules in
+web security; any check that matters for security has to live server-side.
+
+**Docs:** [OWASP: Insecure Direct Object References](https://owasp.org/www-community/attacks/Insecure_Direct_Object_Reference) (same root cause as the entry above)
+
+---
+
+## Real-world files break "every tracked path is a normal readable file"
+
+**The pattern:** building the file tree browser, `git ls-files` was assumed to yield a
+flat list of ordinary text/binary files. Two different real repos (not toy test repos)
+broke that assumption in two different ways:
+
+1. **NUL bytes aren't "binary" by the usual test.** The usual binary-detection trick —
+   "try to `.decode('utf-8')`, if it throws, it's binary" — misses NUL bytes (`\x00`),
+   because NUL is technically a *valid* UTF-8 character. A file can decode successfully
+   and still contain NUL bytes, which Postgres `text` columns reject outright. Fix: check
+   for `\x00` in the raw bytes *before* trying to decode, not after.
+2. **Symlinks aren't files.** `git ls-files` lists tracked symlinks the same as regular
+   files, but a symlink's actual git-tracked content is the *target path string itself*
+   (e.g. `"../../../arch/arc/boot/dts"`), not the thing it points to. Reading it the
+   normal way either silently reads through the link, or — if the target is a directory
+   (real example: the Linux kernel's `scripts/dtc/include-prefixes/arc`) — crashes with
+   `IsADirectoryError`. Fix: check `Path.is_symlink()` first and read the link target via
+   `Path.readlink()`, which matches what git itself considers that path's content to be.
+
+**Why this matters generally:** code that only gets tested against small/simple repos
+will look correct and then fail the first time it meets a large, old, real-world codebase
+— these two bugs only ever showed up when testing against `fbsamples/f8app` and the Linux
+kernel, never against small test repos like `octocat/Hello-World`.
+
+**Docs:** [git-ls-files](https://git-scm.com/docs/git-ls-files) · [Python `pathlib.Path.readlink`](https://docs.python.org/3/library/pathlib.html#pathlib.Path.readlink)
+
+---
+
+## A caught exception's own string can leak a secret
+
+**The gotcha:** adding a timeout to `git clone` meant catching `subprocess.TimeoutExpired`
+— but that exception's default `str()` representation includes the **full command list**
+that was run, argv and all. Here, that command list contained the Basic-auth header with
+a live GitHub token embedded in it (`Authorization: Basic <base64 token>`). Blindly doing
+`repo.error_message = str(exc)` (the generic pattern used for every other unexpected
+failure in this task) would have written that token straight into the database, visible
+to the user through a plain error message.
+
+**The fix:** catch `TimeoutExpired` in its own `except` block, *before* the generic
+`except Exception`, and hand-write a safe message (`f"Clone timed out after {N}s"`)
+instead of using the exception's own string form.
+
+**Why this matters generally:** "just log/store `str(exc)`" is a very common pattern for
+unexpected errors, and it's usually safe — but any exception whose message can include
+data you passed in (command arguments, request bodies, headers) needs to be checked for
+what it might be carrying before it's ever surfaced to a user or written to a log/DB.
+
+**Is this standard?** Yes — this is a known category of accidental secret leakage (secrets
+ending up in logs/error messages), commonly caught in security reviews of exactly this
+kind of "wrap risky operation in try/except, store the error" code.
+
+**Docs:** [Python docs — `subprocess.TimeoutExpired`](https://docs.python.org/3/library/subprocess.html#subprocess.TimeoutExpired)
