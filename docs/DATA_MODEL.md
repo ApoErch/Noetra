@@ -20,9 +20,9 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/db`. Everything scoped by
 |-------|------|-------|
 | id | uuid (pk) | |
 | user_id | uuid (fk → user) | owner |
-| source | enum | `github_public` \| `github_private` \| `zip` |
+| source | enum | `github_public` \| `github_private` \|
 | full_name | text | e.g. `microsoft/vscode` |
-| clone_url | text | nullable for zip |
+| clone_url | text |
 | status | enum | `queued\|cloning\|parsing\|chunking\|embedding\|graphing\|metrics\|ready\|failed` |
 | progress | int | 0–100 |
 | error | text | nullable |

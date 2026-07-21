@@ -1,8 +1,20 @@
+import re
 from dataclasses import dataclass
 
 import httpx
 
 from core.config import get_settings
+
+GITHUB_REPO_URL_RE = re.compile(r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+?)(\.git)?/?$")
+
+
+def parse_repo_slug(github_url: str) -> str:
+    """Validate a GitHub repo URL and return its "owner/repo" slug. Raises ValueError if invalid."""
+    match = GITHUB_REPO_URL_RE.match(github_url)
+    if not match:
+        raise ValueError("Must be a GitHub repository URL, e.g. https://github.com/owner/repo")
+    return f"{match.group('owner')}/{match.group('repo')}"
+
 
 AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 TOKEN_URL = "https://github.com/login/oauth/access_token"
