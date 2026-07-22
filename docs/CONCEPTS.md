@@ -402,3 +402,82 @@ ending up in logs/error messages), commonly caught in security reviews of exactl
 kind of "wrap risky operation in try/except, store the error" code.
 
 **Docs:** [Python docs — `subprocess.TimeoutExpired`](https://docs.python.org/3/library/subprocess.html#subprocess.TimeoutExpired)
+
+---
+
+## Redis's two Celery roles: broker vs. result backend
+
+**What it is:** `core/celery_app.py` configures Redis twice — once as `broker`, once as
+`backend`. These are two different jobs, easy to conflate because it's the same Redis
+instance doing both.
+
+- **Broker** = the message queue. When `api` calls `celery_app.send_task(...)`, that
+  pushes a message onto a Redis list; workers block waiting to pop messages off it. This
+  is the part actually load-bearing in Noetra — it's how `api` hands work to `worker`.
+- **Result backend** = where Celery *would* store a task's return value/status, keyed by
+  task ID, if something called `AsyncResult(task_id).get()` to check on it later.
+
+**Why this matters here:** Noetra doesn't use the result-backend half at all — nothing
+calls `AsyncResult`. Task/indexing status is tracked a different way: `Repository.status`
+in Postgres, updated directly by the worker as it progresses (`queued → cloning → ...`).
+That's deliberate, not an oversight — the indexing pipeline is multiple separate Celery
+tasks, not one task with one "final result," and the status needs to be queryable
+(joined to `owner_id` for ownership checks) in a way a Redis key-by-task-id can't do.
+
+**Is this standard?** Yes — using Celery purely as a task queue (broker) while tracking
+your own domain-level status in your real database is a common pattern once a job's
+progress needs to be more than "did it return a value."
+
+**Docs:** [Celery: Result Backends](https://docs.celeryq.dev/en/stable/userguide/configuration.html#task-result-backend-settings)
+
+---
+
+## Distributed locks with Redis (`SET key val NX EX ttl`)
+
+**What it is:** a way to make sure only one process, across multiple separate
+containers/servers, can do a particular thing at a time — the multi-process equivalent
+of a `threading.Lock()`, except a normal Python lock only works within one process's
+memory, and `api`/`worker` here are separate processes entirely.
+
+**The building block:** Redis's `SET` command with two flags combined:
+- `NX` ("Not eXists") — only set the key if it doesn't already exist. This is what makes
+  it a lock: if two requests race to `SET` the same key at the same instant, Redis
+  guarantees only one of them gets to actually create it (atomic check-and-set, done as
+  one command — no separate "check, then act" steps that could race against each other).
+- `EX <seconds>` — auto-delete the key after N seconds, no matter what. Called a
+  **lease** rather than a plain lock, because it self-expires. This exists purely as a
+  crash safety net: if the process holding the lock dies before it can release the lock
+  itself, the lock doesn't get stuck forever — Redis cleans it up on its own.
+
+**Why we need it here:** `api/repos.py`'s `retry_repository` had a real race — two rapid
+clicks on "Retry" could both see `status == FAILED`, both re-enqueue
+`worker.tasks.clone_repository` for the same repo, and both start deleting/re-cloning
+the same on-disk directory concurrently. `core/redis_client.py`'s
+`acquire_index_lock`/`release_index_lock` close that: the API tries to acquire a
+per-repo lock (`lock:index:{repository_id}`) before enqueueing, and the worker releases
+it in a `finally` block once the job ends (success or failure) — so a second concurrent
+attempt gets `False` back and returns a 409 instead of racing.
+
+**Why Redis specifically (not Postgres, not a Python variable):** needs to be (1) shared
+across separate `api`/`worker` processes — a Python-level lock wouldn't be visible across
+containers, (2) atomic in one round trip — the `NX`+`EX` combo does "check, set, and
+expire" as a single indivisible operation, and (3) self-cleaning — Redis's `EX` gives
+automatic expiry for free; doing the equivalent in Postgres would mean writing and
+running your own cleanup job for stale lock rows.
+
+**A known sharp edge (not yet built — no need to yet):** if a task ever ran *longer*
+than the lock's TTL, the lock could auto-expire while the task is still legitimately
+running, a second process could then acquire a new lock, and the first task's eventual
+`release` would delete that *second* process's lock instead of its own — called **lock
+stealing**. The standard fix is a **fencing token**: store a unique value per acquire
+(not a constant like `"1"`) and only delete on release if the stored value still matches
+your own token (needs a small Lua script to stay atomic). Not implemented here because
+it's only reachable once a task can outlive the TTL, which can't happen yet — clone jobs
+are hard-capped at 300s (`CLONE_TIMEOUT_SECONDS`) against a 600s lock TTL.
+
+**Is this standard?** Yes — `SET NX EX` is the standard simple single-node Redis lock
+pattern. The full "Redlock" algorithm (locking across *multiple independent* Redis
+nodes) is a different, heavier tool for a different problem (Redis node failover), not
+needed here with a single Redis instance.
+
+**Docs:** [Redis `SET` command](https://redis.io/docs/latest/commands/set/) · [Redis distributed locks pattern](https://redis.io/docs/latest/develop/use/patterns/distributed-locks/)

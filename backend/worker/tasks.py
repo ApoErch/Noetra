@@ -8,6 +8,7 @@ from core.celery_app import celery_app
 from core.config import get_settings
 from core.db import SessionLocal
 from core.models import File, Repository, RepositoryStatus, User
+from core.redis_client import release_index_lock
 from core.security import decrypt_token
 
 CLONE_TIMEOUT_SECONDS = 300
@@ -177,3 +178,4 @@ def clone_repository(repository_id: str) -> None:
         raise
     finally:
         db.close()
+        release_index_lock(repository_id)

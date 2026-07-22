@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from api.auth import get_current_user
@@ -7,6 +8,7 @@ from core.celery_app import celery_app
 from core.db import get_db
 from core.github import parse_repo_slug
 from core.models import File, Repository, RepositoryStatus, User
+from core.redis_client import acquire_index_lock
 
 router = APIRouter(prefix="/api/v1/repos", tags=["repos"])
 
@@ -64,8 +66,15 @@ def create_repository(
         name=parse_repo_slug(payload.github_url),
     )
     db.add(repo)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Repository already imported")
     db.refresh(repo)
+
+    if not acquire_index_lock(str(repo.id)):
+        raise HTTPException(status_code=409, detail="Repository is already being indexed")
 
     celery_app.send_task("worker.tasks.clone_repository", args=[str(repo.id)])
 
@@ -99,6 +108,9 @@ def retry_repository(
     repo = _get_owned_repository(repository_id, user, db)
     if repo.status != RepositoryStatus.FAILED:
         raise HTTPException(status_code=409, detail="Only a failed repository can be retried")
+
+    if not acquire_index_lock(str(repo.id)):
+        raise HTTPException(status_code=409, detail="Repository is already being indexed")
 
     db.query(File).filter(File.repository_id == repo.id).delete()
     repo.status = RepositoryStatus.QUEUED

@@ -93,3 +93,23 @@ Most recent entry last. Written by `/endsession`.
 - No total-repo-size cap added (only per-file) — deferred since nothing has actually broken on total size yet (TensorFlow imported fine); not fixing a problem that hasn't occurred.
 **Next step:** Live-review the always-dark theme + modernized sidebar in the browser. After that, likely Milestone 4 (Parse + extract via Tree-sitter) — the file tree browser was built ahead of the numbered milestone order, per `docs/FEATURES.md` #3's explicit note that it's independent of parsing.
 **Watch out for:** No repo-size cap exists yet — a truly enormous monorepo could still take a long time or fill disk; this is a deliberate deferral, not an oversight. `is_binary=True` is now overloaded to mean "not previewable" for three different reasons (actually binary, a symlink, or oversized) — fine for the current single "can't preview" placeholder, but worth remembering if a future feature needs to tell these cases apart.
+
+---
+
+## Session — 2026-07-22 13:29
+
+**Worked on:** Q&A on Redis's role in the project, then closed a real concurrency bug found during that discussion: duplicate/racing indexing jobs for the same repo.
+**Done:**
+- Walked Redis's actual usage (Celery broker + mostly-unused result backend) and confirmed auth is Starlette signed-cookie sessions, not JWT and not Redis-backed.
+- Identified two races in `api/repos.py`: `retry_repository` had no protection against two rapid retries both re-enqueuing `clone_repository` for the same row (real bug — `shutil.rmtree` + re-clone racing on disk); `create_repository`'s duplicate-import check was a TOCTOU race, but turned out to already be closed by an existing DB unique constraint (`uq_repositories_user_id_github_url` in `models.py`) — just needed the `IntegrityError` caught and turned into a 409 instead of a 500.
+- Added `core/redis_client.py`: `acquire_index_lock`/`release_index_lock`, a per-repo mutex via `SET key val NX EX 600` (`INDEX_LOCK_TTL_SECONDS`).
+- Wired the lock into `create_repository` and `retry_repository` (acquire before enqueueing, 409 if already held) and into `clone_repository`'s `finally` block (always released when the job ends, success or failure).
+- Verified interactively inside the running `api` container: acquire → `True`, second acquire while held → `False`, `TTL` reads back as 600, `release` deletes the key, re-acquire after release → `True`.
+- Committed as `3179a0f` — "Lock repo indexing in Redis to prevent duplicate concurrent jobs".
+**In progress:** Nothing code-wise; this was a complete, scoped fix.
+**Key decisions:**
+- Retry's race → Redis lock (transient, per-repo, needs to self-expire). Create's race → existing Postgres unique constraint, not a Redis lock (permanent uniqueness rule belongs in the DB, not re-implemented as a side-channel lock).
+- Lock TTL set to 600s, well above the 300s `CLONE_TIMEOUT_SECONDS` cap — TTL is a crash-only safety net (worker killed mid-task), not meant to ever fire under normal operation, since the `finally` block releases explicitly first.
+- No fencing token / compare-and-delete on lock release — deferred, since it only matters once a task can run longer than the TTL, which isn't reachable yet given the current 300s clone timeout.
+**Next step:** Milestone 4 (Parse + extract via Tree-sitter) is the next unstarted milestone. Also flagged but not started: GitHub API rate limiting via Redis (relevant once repo-listing/browsing against the GitHub API is added), and Redis pub/sub for live clone/index progress (nice-to-have UX, not required by current scope).
+**Watch out for:** The lock's TTL clock starts at *acquire* time (enqueue), not when the worker actually picks up the task — if the queue were ever backed up close to 600s, a lock could expire before its job even starts, letting a duplicate slip through. Not a real risk yet (single worker, near-instant pickup), but worth remembering if concurrency/worker count changes later.
