@@ -113,22 +113,22 @@ export function RepoList({ onOpen }: { onOpen: (repo: Repo) => void }) {
                 </div>
                 <div className="flex shrink-0 gap-2">
                   {repo.status === 'failed' && (
-                    <>
-                      <button
-                        onClick={() => retryRepo.mutate(repo.id)}
-                        disabled={retryRepo.isPending}
-                        className="rounded-md bg-zinc-800 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition hover:bg-zinc-700 disabled:opacity-40"
-                      >
-                        Retry
-                      </button>
-                      <button
-                        onClick={() => removeRepo.mutate(repo.id)}
-                        disabled={removeRepo.isPending}
-                        className="rounded-md bg-red-500/10 px-2.5 py-1.5 text-xs font-medium text-red-400 transition hover:bg-red-500/20 disabled:opacity-40"
-                      >
-                        Remove
-                      </button>
-                    </>
+                    <button
+                      onClick={() => retryRepo.mutate(repo.id)}
+                      disabled={retryRepo.isPending}
+                      className="rounded-md bg-zinc-800 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition hover:bg-zinc-700 disabled:opacity-40"
+                    >
+                      Retry
+                    </button>
+                  )}
+                  {(repo.status === 'failed' || repo.status === 'ready') && (
+                    <button
+                      onClick={() => removeRepo.mutate(repo.id)}
+                      disabled={removeRepo.isPending}
+                      className="rounded-md bg-red-500/10 px-2.5 py-1.5 text-xs font-medium text-red-400 transition hover:bg-red-500/20 disabled:opacity-40"
+                    >
+                      Remove
+                    </button>
                   )}
                   <button
                     onClick={() => onOpen(repo)}

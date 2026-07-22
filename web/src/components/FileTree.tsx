@@ -43,8 +43,8 @@ function FileTreeNode({ node, depth, selectedFileId, onSelectFile }: NodeProps) 
         }`}
       >
         {isSelected && <span className="absolute inset-y-0 left-0 w-0.5 bg-indigo-500" />}
-        <span className="shrink-0 text-zinc-500">
-          <FileIcon />
+        <span className="shrink-0">
+          <FileTypeIcon name={node.name} />
         </span>
         <span className="truncate">{node.name}</span>
       </div>
@@ -101,5 +101,38 @@ function FileIcon() {
     <svg viewBox="0 0 16 16" className="h-4 w-4 fill-current">
       <path d="M4 1.5A1.5 1.5 0 0 1 5.5 0h4.086a1.5 1.5 0 0 1 1.06.44l2.914 2.914A1.5 1.5 0 0 1 14 4.414V14.5A1.5 1.5 0 0 1 12.5 16h-7A1.5 1.5 0 0 1 4 14.5v-13Z" />
     </svg>
+  )
+}
+
+/** Maps a file extension/name to a small colored badge (letters on a rounded square), approximating a per-language icon set without pulling in an icon library. */
+const FILE_BADGES: Record<string, { label: string; bg: string; text: string }> = {
+  js: { label: 'JS', bg: 'bg-yellow-400', text: 'text-black' },
+  jsx: { label: 'JSX', bg: 'bg-yellow-400', text: 'text-black' },
+  ts: { label: 'TS', bg: 'bg-blue-500', text: 'text-white' },
+  tsx: { label: 'TSX', bg: 'bg-blue-500', text: 'text-white' },
+  py: { label: 'PY', bg: 'bg-sky-400', text: 'text-black' },
+  json: { label: '{ }', bg: 'bg-orange-400', text: 'text-black' },
+  md: { label: 'M↓', bg: 'bg-zinc-400', text: 'text-black' },
+}
+
+/** Picks a badge icon by file extension, falling back to a plain gray file glyph for unrecognized types. */
+function FileTypeIcon({ name }: { name: string }) {
+  const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : ''
+  const badge = FILE_BADGES[ext]
+
+  if (!badge) {
+    return (
+      <span className="text-zinc-500">
+        <FileIcon />
+      </span>
+    )
+  }
+
+  return (
+    <span
+      className={`flex h-4 w-4 items-center justify-center rounded-[3px] text-[8px] font-bold leading-none ${badge.bg} ${badge.text}`}
+    >
+      {badge.label}
+    </span>
   )
 }

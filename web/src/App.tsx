@@ -46,10 +46,8 @@ function App() {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-6 bg-gradient-to-b from-zinc-950 to-black px-4">
         <div className="flex flex-col items-center gap-2">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-indigo-600 text-xl font-bold text-white shadow-lg shadow-indigo-600/20">
-            N
-          </div>
-          <h1 className="text-2xl font-semibold tracking-tight text-white">Noetra</h1>
+          <img src="/LogoTransparent.png" alt="Noetra" className="h-64 w-64 object-contain drop-shadow-lg drop-shadow-indigo-600/30" />
+          <h1 className="text-2xl font-semibold tracking-tight text-violet-400">Noetra</h1>
           <p className="text-sm text-zinc-400">Chat with and search any codebase</p>
         </div>
         <a
@@ -74,10 +72,8 @@ function App() {
       <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
           <div className="flex items-center gap-2">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-600 text-sm font-bold text-white">
-              N
-            </div>
-            <span className="font-semibold text-white">Noetra</span>
+            <img src="/LogoTransparent.png" alt="Noetra" className="h-20 w-20 object-contain" />
+            <span className="font-semibold text-violet-400">Noetra</span>
           </div>
           <div className="flex items-center gap-3">
             {me.avatar_url && (
