@@ -481,3 +481,245 @@ nodes) is a different, heavier tool for a different problem (Redis node failover
 needed here with a single Redis instance.
 
 **Docs:** [Redis `SET` command](https://redis.io/docs/latest/commands/set/) · [Redis distributed locks pattern](https://redis.io/docs/latest/develop/use/patterns/distributed-locks/)
+
+---
+
+## RAG vs CAG (cache-augmented generation)
+
+**What they are:** two ways to get a codebase in front of an LLM.
+- **RAG** (retrieval-augmented generation): search the codebase, pull back the ~10 most
+  relevant snippets, put only those in the prompt.
+- **CAG** (cache-augmented generation): skip searching entirely — put the *whole* codebase
+  in the prompt and rely on **prompt caching** so you only pay full price for it once.
+
+**Why prompt caching makes CAG thinkable at all:** providers will cache a long prompt
+*prefix*. Send the same first 500k tokens again within the cache window and they're billed
+at a steep discount instead of full price. So "just include everything" stops being
+obviously insane — with 1M-token context windows it's a real architecture, not a toy.
+
+**Why Noetra uses RAG anyway** — three reasons, in increasing order of how much they hurt:
+1. **Size.** ~1M tokens is roughly 3.5MB, roughly 100k LOC. Plenty of real repos are
+   10–30x that.
+2. **Cost per question.** A cached read of a full repo is roughly 10x what a focused
+   ~15k-token RAG context costs, on every single question.
+3. **Cache TTL — the actual killer.** Caches expire in minutes to an hour. That's fine for
+   one person hammering one repo in one sitting. Noetra is many users x many repos, each
+   queried occasionally, so nearly every question would pay the expensive *cache write*
+   again. CAG's economics assume warmth that a multi-tenant app cannot maintain.
+
+Plus citations get worse: with CAG the model reports line numbers from memory of a huge
+blob and drifts; with RAG the retriever already knows the exact line range.
+
+**How it's used in Noetra:** RAG (see `docs/RETRIEVAL.md`), but two ideas are borrowed
+from CAG — (a) keep the prompt prefix byte-stable (system prompt, then tool definitions,
+then repo map, and never a timestamp or the user's question early in it) so automatic
+prefix caching hits on every follow-up question; (b) a "small repo fits entirely in the
+prompt" fast path is noted as a clean V2 seam.
+
+**Is this standard?** RAG is the default for codebase QA. CAG is newer and genuinely used
+— for single-user tools on bounded corpora. The trade-off is well known: CAG buys
+simplicity and zero index-build time, and pays for it in per-query cost and corpus size.
+
+**Docs:** [OpenAI prompt caching](https://platform.openai.com/docs/guides/prompt-caching)
+
+---
+
+## Why lexical search still beats embeddings on code
+
+**The intuition to unlearn:** "semantic search understands meaning, so it must be better
+than keyword matching." True for prose. Much weaker for code.
+
+**Why code is different:** code is not natural language — it is mostly *identifiers*, and
+the thing you are looking for is usually spelled out literally somewhere in the file. Ask
+"where is `createToken` defined?" and a plain text index nails it instantly. An embedding
+model has to represent `createToken` as a fuzzy point in vector space and hope the right
+chunk lands nearby. Exact matching wins whenever an exact match exists.
+
+Embeddings earn their keep on exactly one class of question: where the user's words appear
+*nowhere* in the codebase — "how does authentication work?" against a file that only ever
+says `Session`, `verify`, `cookie`. That is a real and important class. It is also a
+minority of questions.
+
+**How it's used in Noetra:** this is why the build order puts lexical + structural
+retrieval in milestones 4–5 and embeddings in milestone 7 — and why all three get fused
+rather than picking one. It is also why a query that looks like a bare identifier gets
+routed straight to the symbol table with no embedding API call at all (~10 ms instead of
+~100 ms, for a *better* answer).
+
+**Is this standard?** Increasingly yes — "agentic search" (give the model `grep` plus
+`read_file` plus symbol lookup and let it explore) has become a mainstream alternative to
+vector-first RAG for code specifically. Claude Code itself ships with no vector index.
+
+---
+
+## Postgres full-text search: `tsvector`, GIN, and generated columns
+
+**What it is:** Postgres can do real text search natively — no Elasticsearch needed.
+- `to_tsvector('english', text)` turns a document into a **`tsvector`**: a normalized bag
+  of searchable words (lowercased, stemmed so "running" becomes "run", stopwords dropped).
+- A **GIN index** (Generalized Inverted Index) over that column makes matching fast. It is
+  an *inverted* index: instead of row to words, it stores word to list of rows containing
+  it, which is exactly the lookup a search query needs.
+- **`pg_trgm`** is a separate extension for *fuzzy/substring* matching (breaks text into
+  3-character chunks). Useful for partial identifier matches where stemming does not help.
+
+**Generated column — the part that matters here:** rather than computing the `tsvector` in
+application code and remembering to update it, declare it as a `GENERATED ALWAYS AS
+(to_tsvector('english', coalesce(content, ''))) STORED` column. Postgres recomputes it
+automatically on every insert and update. There is no indexing step to run, no background
+job, and no way for the index to drift out of sync with the content.
+
+**Why we need it here:** it is what makes the revised build order possible. `File.content`
+is already persisted at clone time, so adding this column is *one migration and zero
+pipeline cost* — full-text search over the entire repo works the moment cloning finishes,
+long before parsing or embedding exist. That is enough retrieval to build the agent, the
+citation UI, and the eval harness against.
+
+**How it's used in Noetra:** `file.content_tsv` (see `docs/DATA_MODEL.md`), queried by the
+lexical retriever in `core/retrieval`. `pg_trgm` on `code_entity.name` for fuzzy symbol
+lookup.
+
+**Is this standard?** Yes, for anything short of dedicated-search-engine scale. Reaching
+for Elasticsearch before outgrowing Postgres FTS is a classic premature-infrastructure
+mistake — it is a whole second datastore to run, sync, and keep consistent.
+
+**Docs:** [Postgres full-text search](https://www.postgresql.org/docs/current/textsearch.html) · [generated columns](https://www.postgresql.org/docs/current/ddl-generated-columns.html) · [pg_trgm](https://www.postgresql.org/docs/current/pgtrgm.html)
+
+---
+
+## Contextual retrieval (prefixing chunks before embedding)
+
+**The problem:** you chunk code by function so chunks do not split mid-function. But a
+function body on its own is often *ambiguous*. `def refresh(self, token: str)` — is that a
+cache, a session, an OAuth token, a UI component? The embedding model cannot tell, so the
+vector lands somewhere generic and the chunk never surfaces for "how does auth work?"
+
+**The fix:** before embedding, prepend the chunk's context — file path, enclosing class,
+signature:
+
+```
+src/auth/tokens.py > class TokenService > def refresh(self, token: str) -> Token
+<the actual chunk source>
+```
+
+Now the vector lands near "authentication" in embedding space, because the text says so.
+Embed the prefixed version; return the raw chunk to the model.
+
+**Why it's a good deal:** it is an f-string. No extra API calls, no schema change beyond
+storing what you embedded, no latency. It is the cheapest meaningful recall improvement
+available at that step.
+
+**How it's used in Noetra:** `chunk.embed_text` stores the prefixed version (so a re-embed
+is reproducible and you can see what the model actually saw); `chunk.content` stores the
+raw source that goes back to the LLM. See `docs/RETRIEVAL.md`, chunking rule.
+
+**Is this standard?** Yes — Anthropic named and popularized the technique as "contextual
+retrieval." The fuller version uses an LLM to write a sentence of context per chunk; the
+cheap version (deterministic path/class/signature prefix, what Noetra does) captures much
+of the benefit for none of the cost.
+
+**Docs:** [Anthropic — Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval)
+
+---
+
+## Reranking, and why RRF is not enough on its own
+
+**Reciprocal Rank Fusion (RRF)** merges several ranked lists into one. Its trick is that it
+only looks at *positions*, never scores — so you can fuse a BM25 text score, a symbol-table
+hit, and a cosine similarity without any calibration between them. That is exactly why it
+is used: three retrievers, three incomparable score scales, one merged list, no tuning.
+
+**Its limitation follows from the same trick:** RRF has no idea what the query *means*. A
+result that landed at position 3 in the lexical list gets credit for being at position 3,
+whether or not it actually answers the question.
+
+**A reranker** is a model that does look at meaning: give it the query and a candidate, it
+scores how well that candidate answers *that specific query*. It is more accurate than
+embedding similarity because it reads the query and the document together, rather than
+comparing two vectors computed independently. It is also far too slow to run over the whole
+corpus — which is the point of the pipeline shape:
+
+```
+3 retrievers -> ~30 candidates (RRF, fast, meaning-blind)
+             -> ~8 results     (rerank, slow, meaning-aware)
+             -> the model
+```
+
+**Fuse wide, cut narrow.** Retrieval's job is to not *miss* the right file (recall);
+reranking's job is to make sure it is in the top few (precision). Answer quality depends
+far more on what is in the top 8 than what is in the top 30.
+
+**Why this also explains the eval metric:** Noetra scores retrieval with **recall@k**, not
+precision — because the reranker and then the LLM both get a chance to discard bad hits,
+but neither can recover a correct file that retrieval never surfaced at all.
+
+**Is this standard?** Yes — retrieve-then-rerank is the standard two-stage information
+retrieval architecture, long predating LLMs.
+
+**Docs:** [RRF paper (Cormack et al.)](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)
+
+---
+
+## HNSW vs IVFFlat (pgvector index types)
+
+**The problem both solve:** finding the nearest vectors to a query vector by brute force
+means comparing against every row. Fine at 1,000 chunks, not at 500,000. Both index types
+are **ANN** — Approximate Nearest Neighbour — trading a little accuracy for a lot of speed.
+
+**IVFFlat** clusters the vectors into `lists` buckets up front, then at query time only
+searches the few buckets nearest the query. Downsides: it must be **trained** on existing
+data (so you have to load rows *before* building the index), and you have to pick a good
+`lists` count for your row count — get it wrong and recall or speed suffers.
+
+**HNSW** (Hierarchical Navigable Small World) builds a layered graph of vectors and walks
+it from coarse to fine, like zooming in on a map. No training step, no data required
+before building, better recall at the same speed. It costs more memory and is slower to
+build at very large row counts.
+
+**Why Noetra uses HNSW:** no training step and no tuning pass to get wrong, and V1 is
+nowhere near the scale where IVFFlat's faster build time matters. Fewer knobs, better
+recall.
+
+**Is this standard?** Yes — HNSW is the default recommendation for pgvector unless you are
+at a scale where build time or memory becomes the binding constraint.
+
+**Docs:** [pgvector indexing](https://github.com/pgvector/pgvector#indexing)
+
+---
+
+## Evaluating retrieval: `recall@k`
+
+**The problem it solves:** "the answers feel good" is not a measurement. Every retrieval
+change — contextual prefixes, reranking, adding embeddings at all — is a guess unless
+something says whether it helped.
+
+**What an eval set is:** a fixed list of questions with *known correct answer locations*.
+For Noetra, ~40 questions across 2–3 public repos **pinned to a commit SHA** (so the
+answers do not move under you):
+
+```yaml
+- q: "Where is the session cookie signed?"
+  repo: noetra-fixtures/flask-sample@a1b2c3d
+  answers:
+    - { path: "app/session.py", lines: [40, 68] }
+```
+
+**`recall@k`** is: of all the questions, what fraction had a correct location somewhere in
+the top `k` retrieved results. `recall@5` and `recall@20` are the two worth tracking.
+
+**Why recall and not precision:** precision asks "how much of what I returned was good?"
+Recall asks "did I find the right thing at all?" Downstream, the reranker and then the LLM
+both get to throw away bad results — but neither can recover a file retrieval never
+surfaced. A miss at the retrieval stage is unrecoverable; noise is not.
+
+**How it's used in Noetra:** a pytest that runs each question through `core/retrieval` and
+prints the numbers, cheap enough to run on every retrieval change. It is the reason
+embeddings are milestone 7 rather than 5 — the plan is to establish a lexical-only
+baseline, find which questions fail, then build semantic retrieval against that evidence
+with the tuning knobs set by measurement instead of intuition.
+
+**Is this standard?** Yes — recall@k, precision@k, MRR and nDCG are the standard IR
+metrics, and building a small labelled eval set before tuning a retrieval system is
+ordinary practice. It is also the most interview-legible artifact in the project:
+"lexical-only recall@5 was 0.61; AST-chunked embeddings took it to 0.84" beats
+"I integrated pgvector."

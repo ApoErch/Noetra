@@ -113,3 +113,27 @@ Most recent entry last. Written by `/endsession`.
 - No fencing token / compare-and-delete on lock release — deferred, since it only matters once a task can run longer than the TTL, which isn't reachable yet given the current 300s clone timeout.
 **Next step:** Milestone 4 (Parse + extract via Tree-sitter) is the next unstarted milestone. Also flagged but not started: GitHub API rate limiting via Redis (relevant once repo-listing/browsing against the GitHub API is added), and Redis pub/sub for live clone/index progress (nice-to-have UX, not required by current scope).
 **Watch out for:** The lock's TTL clock starts at *acquire* time (enqueue), not when the worker actually picks up the task — if the queue were ever backed up close to 600s, a lock could expire before its job even starts, letting a duplicate slip through. Not a real risk yet (single worker, near-instant pickup), but worth remembering if concurrency/worker count changes later.
+
+---
+
+## Session — 2026-07-22 19:15
+
+**Worked on:** No code. Design review of milestones 4–6 (working backwards from the end result: "user asks a question → agent answers with clickable `file:line` citations"), then rewrote the planning docs to match the conclusions. Also locked in OpenAI as the AI provider.
+**Done:**
+- Reordered the build order in `CLAUDE.md`: `4` parse + symbol table + lexical index + dependency graph (no AI calls at all) → `5` eval harness + search endpoint/UI over lexical+structural → `6` LangGraph chat agent → `7` chunking + embeddings + semantic + fusion + rerank → `8` metrics/dashboard. Old steps 7–8 ("chat v1 single-shot RAG" then "chat v2 agent") collapsed into one milestone.
+- Reordered the *pipeline* too (separate thing from build order): `cloning+lexical → parsing → graphing → chunking → embedding → metrics`. `graphing` moved ahead of `chunking`/`embedding`; `embedding` is now last before metrics.
+- `docs/RETRIEVAL.md` gained two new sections — **Build order & measurement** (build-cost vs. cost-to-redo table) and **Evaluation** (~40 pinned questions, `recall@5`/`recall@20`) — plus three missing pieces: contextual prefix on chunks before embedding, a rerank step after RRF, and a latency-budget section.
+- `docs/WORKFLOW.md`: progressive unlock documented (file tree + lexical search after `cloning` → symbol lookup after `parsing` → chat at `ready`).
+- `docs/DATA_MODEL.md`: `file.content_tsv` generated column added; `chunk` gained `embed_text`; `chunk.embedding` pinned to `vector(1536)`; indexes list became a table with a milestone column + HNSW-vs-IVFFlat note.
+- Provider swap to OpenAI across `ARCHITECTURE.md`, `FEATURES.md`, `SETUP.md`, `.env.example`, `CLAUDE.md` (`OPENAI_API_KEY` / `OPENAI_CHAT_MODEL` / `OPENAI_EMBEDDING_MODEL`). `SETUP.md`'s env block also picked up `FRONTEND_URL`, which had drifted out of sync with `.env.example`.
+**In progress:** Nothing code-wise. Milestone 4 is still unstarted — the docs it will be built against are now correct.
+**Key decisions:**
+- **Retrievers ship in cost order, cheap first.** Lexical is one migration and trivial to throw away; embeddings cost a full re-embed of the corpus whenever chunking strategy changes — and chunking is exactly what changes after first contact with real failing queries. So: build cheap, measure, then buy the expensive one.
+- **Eval set before the third retriever.** ~40 questions with known answer locations, scored by `recall@k`. Without it, every embedding knob (chunk size, `k`, threshold) is guesswork and no regression can be attributed to a specific retriever.
+- **No single-shot RAG milestone.** Once retrievers are exposed as tools, the agent loop is a small amount of code on top; the single-shot version would be deleted a week later.
+- **RAG over CAG.** CAG (whole repo in the prompt, lean on prompt caching) breaks on repo size (~1M tokens ≈ ~100k LOC), costs ~10× more per question, and — the actual killer — can't keep N users × M repos warm inside a 5-min/1-h cache TTL. Kept two ideas from it: stable prompt prefix so automatic caching hits, and a small-repo fast path as a V2 seam.
+- **Agentic search over vector-first.** For code, the identifier you want is usually literally in the file; embeddings earn their keep only on conceptual questions where the user's words appear nowhere in the codebase. Real class, but a minority — hence lexical/structural carrying more weight than vector-search-first intuition suggests.
+- **OpenAI `text-embedding-3-small`** (1536 dims) as the default; `dimensions` parameter means `-large` can be truncated into the same column later without a migration.
+- **Citations come from tool-result metadata, never from the model** — the retriever already knows file + line range; asking the model to report where it found something invites drift.
+**Next step:** Milestone 4 — Tree-sitter parse + extract into `code_entity`, plus the `content_tsv` generated column + GIN index and the dependency-edge resolution, all in one migration. No AI calls in that milestone.
+**Watch out for:** `backend/core/config.py:20-22` still declares `anthropic_api_key` / `embedding_provider` / `embedding_api_key` — the docs and `.env.example` moved to OpenAI but the code didn't (deliberate: this session was docs-only). All three default to `""` so nothing breaks, but they need renaming to `openai_api_key` / `openai_chat_model` / `openai_embedding_model` before `core/ai` is written. The local `.env` also still has `ANTHROPIC_API_KEY` in it.

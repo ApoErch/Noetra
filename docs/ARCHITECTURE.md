@@ -21,8 +21,8 @@
                                                │
                               ┌────────────────┼────────────────┐
                               ▼                ▼                ▼
-                         Tree-sitter     Voyage / Anthropic   Git / GitHub API
-                         (parse+chunk)   (embed / summarize)  (clone / metadata)
+                         Tree-sitter        OpenAI API       Git / GitHub API
+                         (parse+chunk)    (chat / embed)     (clone / metadata)
 ```
 
 ## Components
@@ -48,7 +48,12 @@ keeps embeddings in the same DB — no second datastore in V1.
 
 - `core/db` — SQLAlchemy models + session.
 - `core/github` — the only place that talks to git/GitHub.
-- `core/ai` — the only place that calls Anthropic and the embedding provider.
+- `core/ai` — the only place that calls OpenAI (chat completions **and** embeddings).
+  Nothing outside this module imports the `openai` package. Two narrow interfaces —
+  "generate a streamed completion given messages + tools" and "embed these strings" —
+  which is the entire cost of switching providers later. Retrieval quality depends on the
+  embedding model, so this seam is worth keeping honest even though V1 has no second
+  provider.
 - `core/retrieval` — the hybrid retriever (`RETRIEVAL.md`). Used by both the search
   endpoint and the agent tools.
 - `core/agent` — the LangGraph graph + tool definitions.
@@ -63,12 +68,12 @@ keeps embeddings in the same DB — no second datastore in V1.
 - **Indexing:** worker consumes the job, advances status per stage, writes results,
   sets `ready` (or `failed` + error).
 - **Chat:** web → api → LangGraph agent → agent calls retrieval tools in a loop →
-  Anthropic → streamed answer with `file:line` citations → web.
+  OpenAI → streamed answer with `file:line` citations → web.
 
 ## Boundaries / rules
 
 - The request cycle never clones, parses, or embeds — always a Celery task.
-- All Anthropic + embedding calls go through `core/ai`.
+- All OpenAI calls (chat + embeddings) go through `core/ai`.
 - All git/GitHub access goes through `core/github`.
 - All retrieval goes through `core/retrieval`.
 - `indexer` stays pure (no side effects) for testability.

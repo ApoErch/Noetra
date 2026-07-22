@@ -20,9 +20,16 @@ Answers: definitions, and what depends on what.
 
 **3. Semantic** — meaning, via embeddings.
 pgvector similarity over **AST-aware chunks** (chunked by function/class, never fixed
-token windows). Uses a code-capable embedding model (provider chosen at implementation time).
+token windows). OpenAI `text-embedding-3-small` — 1536 dimensions, cheap, good enough for
+code; `-large` (3072) is the upgrade path if evals justify it. OpenAI's `dimensions`
+parameter can truncate the vector later, so the index can shrink without changing models.
 Answers: conceptual, fuzzy questions where the words don't match the code.
 *"how does authentication work?"*
+
+This is the only retriever that earns its keep on questions where the user's words appear
+nowhere in the codebase — which is a real and important class, but a **minority** of code
+questions. Most of the time the identifier you want is literally in the file, which is why
+the two retrievers above carry more weight than vector-search-first intuition suggests.
 
 ## Chunking rule (non-negotiable)
 
@@ -30,6 +37,21 @@ Chunk by **AST node** (function / class / method) via Tree-sitter — never by f
 count. Each chunk carries: file path, line range, the entity it belongs to, and enough
 signature/context to be self-describing. A chunk that splits a function in half poisons
 retrieval, so respect syntax boundaries.
+
+**Embed the chunk with its context prefixed.** Before sending a chunk to the embedding
+model, prepend its file path, enclosing class, and signature:
+
+```
+src/auth/tokens.py › class TokenService › def refresh(self, token: str) -> Token
+<the actual chunk source>
+```
+
+A bare function body is often ambiguous — `def refresh(self, token)` could be a cache, a
+session, or an OAuth token. The prefix tells the embedding model which, so the vector lands
+near "authentication" in embedding space instead of somewhere generic. This pattern is
+called **contextual retrieval**, and it is the cheapest large recall gain available at this
+step: one f-string, no extra API calls, no schema change. Store the prefixed text as what
+was embedded; return the raw chunk to the model.
 
 ## Fusion
 
@@ -42,6 +64,30 @@ Cheap routing before fusion: if the query looks like a bare symbol (`createToken
 `UserService`), weight structural + lexical; if it's a natural-language question, weight
 semantic. When unsure, run all three — RRF handles the merge.
 
+**Then rerank.** RRF is good at *merging* rankings but knows nothing about the query's
+meaning — it only sees positions. So fuse wide and cut narrow: take the top ~30 fused
+results, score each one against the query with a reranker, and pass only the top ~8 to the
+model. Costs roughly 200 ms; buys a large precision gain, because the model's answer
+quality depends far more on what's in the top 8 than on what's in the top 30.
+
+### Latency budget
+
+Retrieval sits directly in the user's perceived response time, so treat these as design
+constraints, not optimizations to do later:
+
+- **Route before you embed.** A bare-identifier query (`^[A-Za-z_]\w*$`) resolves through
+  the symbol table in ~10 ms. Sending it through an embedding API call first adds ~100 ms
+  for a worse answer. Skip the call entirely.
+- **Keep the prompt prefix stable.** System prompt → tool definitions → repo map, in that
+  order and byte-identical across every question about a repo. OpenAI caches long prompt
+  prefixes automatically, so this costs nothing to arrange and pays on every follow-up
+  question. It also means: never interpolate a timestamp, request ID, or the user's
+  question into the system prompt — one changed byte early in the prefix invalidates
+  everything after it.
+- **Stream tool-call status, not just tokens.** An agent loop can take 10 s. Showing
+  *"searching for `TokenService`… reading `auth/tokens.py`…"* is the difference between
+  that feeling alive and feeling hung.
+
 ## How the agent uses it (LangGraph)
 
 The retriever is exposed to the agent as **tools**, not a single pre-baked context blob:
@@ -53,8 +99,70 @@ The retriever is exposed to the agent as **tools**, not a single pre-baked conte
 
 The agent iterates like a developer: search → read a result → realize it needs a caller →
 search again → answer. Every answer cites concrete `file:line` locations pulled from
-tool results. The single-shot RAG milestone (build step 7) uses the same retriever with
-one `code_search` call and no loop — that's the difference between the two chat versions.
+tool results.
+
+**Citations come from tool-result metadata, never from the model.** The retriever already
+knows the file and line range of every hit; carry that through and render it. Asking the
+model to report where it found something invites it to drift a few lines, or to cite a file
+it reasoned about but never opened. This is the difference between a citation the user
+trusts and one they stop clicking.
+
+There is no separate single-shot RAG version. It's tempting to think "one retrieval call,
+no loop" is the simpler first step, but once the retrievers are already exposed as tools,
+the loop is a handful of lines on top — and the single-shot version would be thrown away
+immediately after. Ship the agent.
+
+## Build order & measurement
+
+The three retrievers do not get built at once, and they do not get built in the order
+they're listed above. **Build them in cost order — cheap first, measure, then buy the
+expensive one.**
+
+| | Build cost | Cost to redo | Ships in |
+|---|---|---|---|
+| Lexical | one migration (`tsvector` over `file.content`, which clone already persists) | trivial | M4 |
+| Structural | falls out of the symbol table you're building anyway | trivial | M4 |
+| Semantic | chunking + embedding pipeline + pgvector index + tuning | **re-embed the entire corpus** | M7 |
+
+The asymmetry in the third column is the whole argument. Chunking strategy is the thing
+most likely to change once you see real queries fail — and changing it means paying the
+expensive operation again. So the sequence is: ship lexical + structural, build the eval
+set, run the agent against it, find out *which questions actually fail and why*, and only
+then build semantic retrieval — with the tuning knobs (chunk granularity, `k`, threshold,
+whether the context prefix helps) set against evidence instead of intuition.
+
+The other benefit is diagnostic. If three fused retrievers return junk, you cannot tell
+which one is at fault. Starting with one gives you a clean baseline to attribute every
+later regression against.
+
+**The rule: no retriever joins the fusion without a `recall@k` movement that justifies it.**
+
+## Evaluation
+
+Retrieval quality is the whole game, and "the answers feel good" is not a measurement.
+
+Build a small eval set — around 40 questions across 2–3 pinned public repos (pinned to a
+commit SHA, so the answers don't move). Each question records the file paths and line
+ranges that actually contain the answer:
+
+```yaml
+- q: "Where is the session cookie signed?"
+  repo: noetra-fixtures/flask-sample@a1b2c3d
+  answers:
+    - { path: "app/session.py", lines: [40, 68] }
+```
+
+A pytest runs each question through `core/retrieval` and reports **recall@5** and
+**recall@20** — of the questions, how many had a correct location somewhere in the top 5 /
+top 20 hits. Recall is the right metric here rather than precision, because the reranker
+and then the model both get a chance to discard bad hits; what they cannot do is recover a
+correct file that retrieval never surfaced.
+
+Keep it cheap enough to run on every retrieval change. This number is the scoreboard: it's
+what tells you whether contextual prefixes helped, whether reranking was worth 200 ms, and
+whether semantic retrieval earned its place. It's also the single most interview-legible
+artifact in the project — *"lexical-only recall@5 was 0.61; adding AST-chunked embeddings
+took it to 0.84"* is a much stronger claim than *"I integrated pgvector."*
 
 ## Build note
 

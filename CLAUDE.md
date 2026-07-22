@@ -54,10 +54,20 @@ finish an area, finish it cleanly: no dead code, stubs, or half-wired leftovers.
 ## V1 scope
 
 GitHub OAuth login (required before any import) · repo import — public URL (plain clone) or private repo (clone with the user's decrypted token) · background indexing
-pipeline (clone → parse → chunk → embed → symbol+graph → metrics) · **hybrid retrieval**
-(lexical + structural + semantic) · streamed LangGraph chat agent with citations ·
-semantic search · basic dashboard (files, functions, LOC, language breakdown, largest
-files).
+pipeline (clone+lexical index → parse+symbols → graph → chunk → embed → metrics) ·
+**hybrid retrieval** (lexical + structural + semantic, RRF-fused) · a **retrieval eval
+set** that keeps that hybrid honest · streamed LangGraph chat agent with citations ·
+hybrid search · basic dashboard (files, functions, LOC, language breakdown, largest files).
+
+That arrow chain is the **pipeline order** — what happens during a single indexing run of
+one repo, every time. Don't confuse it with the **build order** below, which is the
+sequence in which the code gets written over the life of the project. They're separate
+decisions that happen to follow the same principle: *cheap and deterministic first, slow
+and expensive last.*
+
+In the pipeline, that means the lexical index, symbol table, and import graph all finish
+before chunking and embedding start — so a repo becomes searchable minutes into indexing
+rather than only when the slowest stage completes.
 
 **Languages at launch:** Python, JavaScript, TypeScript. Nothing else.
 
@@ -67,9 +77,10 @@ architecture graph viz (React Flow), AI code/PR review, advanced metrics.
 ## Stack
 
 React + TS + Tailwind + Monaco + TanStack Query · FastAPI + Pydantic v2 + SQLAlchemy ·
-Celery + Redis · Postgres + pgvector · Tree-sitter · Anthropic API for chat/summaries.
-Embeddings provider is TBD and **must stay behind one interface in `core/ai`** so it's
-swappable. Docker Compose local, GitHub Actions CI, AWS deploy (`docs/DEPLOYMENT.md`).
+Celery + Redis · Postgres + pgvector · Tree-sitter · **OpenAI API for chat + embeddings**
+(`text-embedding-3-small`, 1536 dims). Both **must stay behind one interface in `core/ai`**
+so the provider is swappable — nothing outside `core/ai` imports the OpenAI SDK.
+Docker Compose local, GitHub Actions CI, AWS deploy (`docs/DEPLOYMENT.md`).
 
 ## Module boundaries (respect these when adding code)
 
@@ -88,23 +99,47 @@ Retrieval lives **only** in `core/retrieval`.
 
 ## Build order (each milestone runs end-to-end before the next)
 
+**Ordering principle: build retrievers in cost order — cheap first, measure, then buy the
+expensive one.** Lexical search is cheap to build and cheap to throw away. Embeddings are
+neither: changing the chunking strategy means re-embedding the whole corpus, and that
+strategy is exactly what tends to change after first contact with real failing queries.
+So the eval set and the citation UI land *before* pgvector, and semantic retrieval has to
+earn its slot by moving `recall@k` on questions the cheap retrievers demonstrably fail.
+
+This works because `file.content` is already persisted at clone time (M3). A Postgres
+`tsvector` index over it is one migration and zero pipeline cost, which is enough
+retrieval to build the agent and the whole citation path against.
+
 Progress is logged in `docs/LEARNING_LOG.md`. **Done: M1 Skeleton, M2 Auth.**
-3. Import + clone (enqueue Celery job, clone, persist `Repository` + status)
-4. Parse + extract (Tree-sitter py/js/ts → files + entities = the symbol table)
-5. AST chunking + embeddings (chunk by function/class → pgvector; build dep edges)
-6. Hybrid retrieval (lexical + structural + semantic, fused) + search endpoint & UI
-7. Chat v1 (single-shot RAG over the retriever, streamed, cited) — ship-quality MVP
-8. Chat v2 (LangGraph agent: `code_search`, `find_symbol`, `read_file`,
-   `list_dependencies`; multi-step loop)
-9. Basic metrics + dashboard
+**Done M3. Import + clone (enqueue Celery job, clone, persist `Repository` + status)**
+4. Parse + extract (Tree-sitter py/js/ts → files + entities = the symbol table), plus the
+   two things that ride along free with it: the **lexical index** (`tsvector` + `pg_trgm`)
+   and the **dependency graph** (resolve the imports the parser already extracted). No AI
+   calls in this milestone at all.
+5. **Eval harness** (~40 questions with known answer locations → `recall@k`) + search
+   endpoint & UI over lexical + structural. First end-to-end `file:line` citations, and
+   the scoreboard every later retrieval change is judged against.
+6. Chat agent (LangGraph: `code_search`, `find_symbol`, `read_file`, `list_dependencies`;
+   multi-step loop, streamed, cited) — ship-quality MVP. All four tools have real data
+   behind them by now.
+7. AST chunking + embeddings (chunk by function/class → pgvector) + the semantic leg, RRF
+   fusion, and reranking. Entered with a measured baseline and a known list of failures.
+8. Basic metrics + dashboard
+
+Milestone 7 is where the old plan's steps 5–6 went, and the old "chat v1 single-shot RAG
+then chat v2 agent" split collapsed into milestone 6 — see `docs/FEATURES.md` §4 for why
+shipping the agent directly is the smaller piece of work, not the larger one.
 
 ## Conventions
 
 - Strict typing both sides (mypy / TS strict). REST under `/api/v1`; validate with
   Pydantic at the boundary.
 - Anything touching a repo is a Celery task in `worker` — never inline in `api`.
-- Status is first-class: `queued → cloning → parsing → chunking → embedding → graphing →
-  metrics → ready | failed`, surfaced to the UI.
+- Status is first-class: `queued → cloning → parsing → graphing → chunking → embedding →
+  metrics → ready | failed`, surfaced to the UI. (Same set of states as before; `graphing`
+  moved ahead of `chunking`/`embedding` to match the pipeline order above. The
+  `RepositoryStatus` enum in `core/models.py` already holds every value — only the order
+  the worker advances through them changes.)
 - Secrets via env only; keep `.env.example` current.
 - Everything scoped by `repository_id`; ownership checked on every read.
 
