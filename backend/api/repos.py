@@ -133,6 +133,11 @@ def delete_repository(
     db.delete(repo)
     db.commit()
 
+    # The on-disk clone (which can be multiple GB for a large repo) isn't part
+    # of the DB cascade — clean it up in the background rather than blocking
+    # this request on a potentially large `rmtree`.
+    celery_app.send_task("worker.tasks.delete_repository_clone", args=[repository_id])
+
 
 @router.get("/{repository_id}/files")
 def list_files(

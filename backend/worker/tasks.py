@@ -261,3 +261,11 @@ def clone_repository(repository_id: str) -> None:
     finally:
         db.close()
         release_index_lock(repository_id)
+
+
+@celery_app.task
+def delete_repository_clone(repository_id: str) -> None:
+    """Remove a deleted repo's on-disk clone directory. Its DB row is already gone by the time this runs — the path is derived purely from `repository_id`, same as `clone_repository` builds it."""
+    dest = Path(get_settings().clone_storage_dir) / repository_id
+    if dest.exists():
+        shutil.rmtree(dest)
