@@ -137,3 +137,25 @@ Most recent entry last. Written by `/endsession`.
 - **Citations come from tool-result metadata, never from the model** — the retriever already knows file + line range; asking the model to report where it found something invites drift.
 **Next step:** Milestone 4 — Tree-sitter parse + extract into `code_entity`, plus the `content_tsv` generated column + GIN index and the dependency-edge resolution, all in one migration. No AI calls in that milestone.
 **Watch out for:** `backend/core/config.py:20-22` still declares `anthropic_api_key` / `embedding_provider` / `embedding_api_key` — the docs and `.env.example` moved to OpenAI but the code didn't (deliberate: this session was docs-only). All three default to `""` so nothing breaks, but they need renaming to `openai_api_key` / `openai_chat_model` / `openai_embedding_model` before `core/ai` is written. The local `.env` also still has `ANTHROPIC_API_KEY` in it.
+
+---
+
+## Session — 2026-07-24 03:58
+
+**Worked on:** Milestone 4 (Parse + extract) — built and verified end-to-end: Tree-sitter symbol extraction, the lexical index, and the import/dependency graph.
+**Done:**
+- Added `tree-sitter` + `tree-sitter-python`/`-javascript`/`-typescript` (the latter covers both `.ts` and `.tsx` via two grammars in one package).
+- Built `indexer/parser.py` — pure Tree-sitter extractor for functions/classes/methods (including arrow functions bound to `const`/class fields, confirmed via a live grammar probe) plus clean import module strings, across `.py/.js/.jsx/.ts/.tsx`.
+- Added `CodeEntity` model + `file.language`/`loc`/`content_tsv` (generated `tsvector` column) + `pg_trgm` extension + GIN indexes on both; migrated (`4e35f936f155`).
+- Built `indexer/graph.py` — pure import resolver (absolute Python imports via suffix-matching against known repo paths, since the import root/`src`-layout isn't known ahead of time; relative Python imports via exact dot-counting; JS/TS via relative-path + extension/`index` resolution). Bare/stdlib/npm specifiers correctly drop out (nothing to resolve against).
+- Added `DependencyEdge` model + migration (`fb86cf1b15fb`) — had to hand-strip two spurious `drop_index` lines autogenerate proposed for the hand-written lexical/trigram indexes it couldn't see in the model diff.
+- Wired both stages into `worker/tasks.py::clone_repository`: `cloning → parsing → graphing`, persisting `CodeEntity`/`DependencyEdge` rows and file `language`/`loc` along the way. `Repository.status` now correctly parks at the last stage actually completed (`GRAPHING`) instead of falsely jumping to `READY` — closes a gap flagged in the 2026-07-21 session log.
+- Verified end-to-end against two real repos: `pypa/sampleproject` (correct entities incl. a class+method, correct `src/`-layout absolute-import resolution) and a synthetic multi-package layout for the trickier relative-import dot-counting cases.
+**In progress:** Nothing code-wise — Milestone 4 is functionally complete per `CLAUDE.md`'s build order (symbol table + lexical index + dependency graph, no AI calls).
+**Key decisions:**
+- Module specifier extraction (`.utils`, `./foo`, `pathlib`) moved into `parser.py` rather than staying deferred to graphing as originally planned — it's still pure syntax (a direct Tree-sitter field read), so only the *resolution* to an actual file belongs in graphing.
+- Arrow functions (`const foo = () => {}`) and class-field arrow handlers (`handleClick = () => {}`) are extracted as real entities — confirmed via a live grammar dump that `variable_declarator`/`field_definition` expose a `value` field pointing at `arrow_function`/`function_expression`, rather than guessing at node names.
+- No unique constraint on `dependency_edges` — `resolve_dependencies` already dedupes via a `set`, so a DB constraint would only ever fire on an app bug, not a real scenario.
+- Nested closures/helper defs inside a function body are deliberately not extracted as separate entities (kept the symbol table to top-level/class-member shapes).
+**Next step:** Milestone 5 — eval harness (~40 pinned questions → `recall@k`) + search endpoint/UI over lexical + structural retrieval. First real user-facing surface for everything built in M4.
+**Watch out for:** Postgres enums added via `ALTER TABLE` (not `CREATE TABLE`) don't auto-create their type — hit this once already (`file_language`); if a similar enum column gets added to an existing table later, remember the explicit `.create(op.get_bind(), checkfirst=True)` + `create_type=False` pattern in `4e35f936f155`. Also: alembic autogenerate can't see hand-written raw-SQL indexes (the GIN ones) in its model diff and will propose dropping them on any later table change — always read a generated migration's `upgrade()`/`downgrade()` before applying, don't just autogenerate-and-run.

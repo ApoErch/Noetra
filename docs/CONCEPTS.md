@@ -723,3 +723,128 @@ metrics, and building a small labelled eval set before tuning a retrieval system
 ordinary practice. It is also the most interview-legible artifact in the project:
 "lexical-only recall@5 was 0.61; AST-chunked embeddings took it to 0.84" beats
 "I integrated pgvector."
+
+---
+
+## Tree-sitter: a parser engine + swappable grammars
+
+**What it is:** a parsing library (built by GitHub) that turns source code text into a
+**concrete syntax tree (CST)** — a tree where a function is a node containing a name
+node, a parameter-list node, a body node, etc., instead of just being characters in a
+string. The parsing *engine* is one package (`tree-sitter`); each language's grammar
+(the actual rules for what "a function looks like" in that language) ships as its own
+separate package (`tree-sitter-python`, `tree-sitter-javascript`, ...).
+
+**Why it beats a language-specific tool (like Python's `ast`):**
+1. **One API, many languages.** `ast.parse()` only understands Python. `indexer` needs
+   Python, JS, *and* TS behind one code path — Tree-sitter's `Parser`/`Node`/`Tree`
+   classes work identically no matter which grammar is loaded.
+2. **Error-tolerant.** It produces the best tree it can even around a syntax error
+   elsewhere in the file (a real concern across an entire real-world repo).
+
+**The trade-off:** Tree-sitter's tree is *syntactic* only — it knows "this is a call
+expression," not "this call resolves to that specific imported function." That's exactly
+why import *resolution* (mapping `.utils` to an actual file) had to be a separate step
+(`indexer/graph.py`) built on top of parsing's output, not part of parsing itself.
+
+**A gotcha worth remembering:** TypeScript and TSX (TS + embedded JSX) can't share one
+grammar the way JS and JSX can — TS generics (`<T>`) and JSX tags are ambiguous in a
+couple of spots. `tree-sitter-typescript` ships *two* separate compiled languages in one
+package (`language_typescript()` and `language_tsx()`) specifically because of this.
+
+**How it's used in Noetra:** `indexer/parser.py` — one `Parser` instance per file
+extension, all built from this one library. Confirmed the exact node/field names
+(`variable_declarator.value`, `import_from_statement.module_name`, etc.) by literally
+parsing sample snippets and printing the tree, rather than guessing from documentation.
+
+**Is this standard?** Yes — Tree-sitter is what GitHub's own code navigation/highlighting
+uses, and it's become the default choice for any tool that needs multi-language,
+error-tolerant parsing (linters, editors, static analysis).
+
+**Docs:** [Tree-sitter — using parsers](https://tree-sitter.github.io/tree-sitter/using-parsers)
+
+---
+
+## Postgres transactional DDL (schema changes roll back too)
+
+**What it is:** in Postgres, `CREATE TABLE`/`ALTER TABLE`/etc. are transactional just
+like `INSERT`/`UPDATE` — if a migration runs several DDL statements and one fails partway
+through, *everything* in that transaction (including the tables/columns that were
+already successfully created earlier in the same migration) gets rolled back together.
+
+**Why this matters:** hit this directly — a migration that created `code_entities`
+successfully, then failed on a later `ALTER TABLE files ADD COLUMN language ...`. Despite
+the partial success, `alembic current` afterward still showed the *previous* revision,
+and `code_entities` didn't exist in the database at all. Nothing needed manual cleanup;
+the whole migration had already been undone automatically.
+
+**Why this is worth knowing generally:** not every database gives you this for free —
+MySQL, for example, does **not** roll back DDL on failure, so a multi-statement MySQL
+migration that fails halfway through can leave a genuinely inconsistent schema that
+needs manual repair. Alembic prints "Will assume transactional DDL" precisely because
+this behavior is database-specific, not a universal guarantee.
+
+**Is this standard?** Yes, for Postgres specifically — one of the reasons Postgres is
+often preferred for schema-migration-heavy applications.
+
+**Docs:** [Postgres — DDL and transactions](https://www.postgresql.org/docs/current/ddl.html) (see the general note on transactional DDL under "Overview")
+
+---
+
+## Postgres enums + Alembic: `CREATE TABLE` auto-creates the type, `ALTER TABLE` doesn't
+
+**The gotcha:** adding a new table with an enum column (`code_entities.kind`) worked with
+zero extra effort — SQLAlchemy/Alembic automatically ran `CREATE TYPE entity_kind AS
+ENUM(...)` right before the `CREATE TABLE`. Adding an enum column to an *already-existing*
+table (`files.language`) via plain `op.add_column(...)`, using the exact same `sa.Enum(...)`
+syntax, failed outright: `psycopg.errors.UndefinedObject: type "file_language" does not
+exist`.
+
+**Why they behave differently:** `CREATE TABLE` is understood by SQLAlchemy as "building
+this whole thing from scratch," so it walks every column's type and creates anything that
+needs creating first. A bare `ALTER TABLE ... ADD COLUMN` is a much narrower operation —
+Alembic doesn't infer "and also create this brand-new type" from it; it assumes the type
+already exists.
+
+**The fix:** create the enum type explicitly first, then tell the column not to try
+creating it again:
+```python
+file_language_enum = postgresql.ENUM("PYTHON", "JAVASCRIPT", "TYPESCRIPT", name="file_language")
+file_language_enum.create(op.get_bind(), checkfirst=True)
+op.add_column("files", sa.Column("language", sa.Enum(..., name="file_language", create_type=False)))
+```
+And the reverse on `downgrade()`: dropping the column doesn't drop the type it referenced
+— that needs its own explicit `postgresql.ENUM(name=...).drop(...)`.
+
+**Is this standard?** Yes — a well-known Alembic/Postgres-enum rough edge, not a
+Noetra-specific bug. Worth remembering any time an enum column gets added to a table that
+already exists, rather than created alongside it.
+
+**Docs:** [Alembic — PostgreSQL ENUM cookbook recipe](https://alembic.sqlalchemy.org/en/latest/cookbook.html) (search "postgresql-enum")
+
+---
+
+## Alembic autogenerate can't see hand-written raw-SQL DDL
+
+**The gotcha:** a migration added two GIN indexes via `op.execute("CREATE INDEX ...")`
+instead of a SQLAlchemy `Index(...)` object, because they needed a non-default operator
+class (`gin_trgm_ops`) that plain `Index()` can't express. The *next* migration's
+`--autogenerate` run flagged both as "removed" and generated `drop_index` calls for
+them — because autogenerate diffs the live database against `Base.metadata`, and
+anything created outside that metadata (raw SQL) is invisible to it. From
+autogenerate's point of view, a real index it doesn't know about looks identical to one
+that used to be declared and got deleted.
+
+**Why this matters:** blindly running `alembic upgrade head` on an autogenerated
+migration without reading it first would have silently dropped two working, real
+indexes that lexical/fuzzy search depends on.
+
+**The practical rule this confirms:** always read a generated migration's `upgrade()`
+and `downgrade()` before applying it — autogenerate is a diffing *tool*, not a proof
+that the result is correct. This is exactly why Alembic prints "please adjust!" in its
+generated comments.
+
+**Is this standard?** Yes — this is a known, documented limitation of any ORM-metadata-
+diffing autogenerate tool, not specific to this index or to Noetra.
+
+**Docs:** [Alembic — autogenerate limitations](https://alembic.sqlalchemy.org/en/latest/autogenerate.html#what-does-autogenerate-detect-and-what-does-it-not-detect)

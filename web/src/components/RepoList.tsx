@@ -10,13 +10,22 @@ export type Repo = {
   error_message: string | null
 }
 
-const OPENABLE_STATUSES = new Set(['ready'])
+// File tree + lexical search need cloning to have *finished*, not just
+// started — worker/tasks.py sets status=CLONING before the clone even runs
+// and doesn't commit any `file` rows until that whole stage completes, so
+// "cloning" itself must stay non-openable or a big repo shows an empty tree.
+const OPENABLE_STATUSES = new Set(['parsing', 'graphing', 'chunking', 'embedding', 'metrics', 'ready'])
 
 const STATUS_STYLES: Record<string, string> = {
   ready: 'bg-emerald-500/10 text-emerald-400 ring-emerald-500/20',
   failed: 'bg-red-500/10 text-red-400 ring-red-500/20',
   queued: 'bg-zinc-800 text-zinc-300 ring-zinc-700',
   cloning: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
+  parsing: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
+  graphing: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
+  chunking: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
+  embedding: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
+  metrics: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -121,7 +130,7 @@ export function RepoList({ onOpen }: { onOpen: (repo: Repo) => void }) {
                       Retry
                     </button>
                   )}
-                  {(repo.status === 'failed' || repo.status === 'ready') && (
+                  {(repo.status === 'failed' || OPENABLE_STATUSES.has(repo.status)) && (
                     <button
                       onClick={() => removeRepo.mutate(repo.id)}
                       disabled={removeRepo.isPending}
