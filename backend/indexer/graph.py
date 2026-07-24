@@ -23,7 +23,26 @@ class DependencyEdge:
     to_path: str
 
 
-def resolve_python_import(from_path: str, module: str, known_paths: set[str]) -> str | None:
+def build_suffix_index(known_paths: set[str]) -> dict[str, set[str]]:
+    """Map every path *suffix* (each directory component onward, including the whole path) to the full path(s) sharing it.
+
+    Built once per repo so absolute-import resolution below is a single dict
+    lookup instead of a linear scan over every file — the scan approach took
+    ~8 minutes on tensorflow/tensorflow (36k files, thousands of absolute
+    imports: O(imports * files) is only cheap at small repo scale).
+    """
+    index: dict[str, set[str]] = {}
+    for path in known_paths:
+        parts = path.split("/")
+        for i in range(len(parts)):
+            suffix = "/".join(parts[i:])
+            index.setdefault(suffix, set()).add(path)
+    return index
+
+
+def resolve_python_import(
+    from_path: str, module: str, known_paths: set[str], suffix_index: dict[str, set[str]]
+) -> str | None:
     """Resolve one Python import's module string to a repo-relative file path, or None if it's not in this repo (stdlib/third-party)."""
     leading_dots = len(module) - len(module.lstrip("."))
     remainder = module[leading_dots:]  # e.g. "utils.helpers", or "" for a bare "."/".."
@@ -31,10 +50,9 @@ def resolve_python_import(from_path: str, module: str, known_paths: set[str]) ->
     if leading_dots == 0:
         # Absolute import: we don't know the repo's real import root (repo root?
         # a `src/` layout? something else?), so match by suffix against every
-        # known file rather than guessing one fixed prefix.
+        # known file — via the precomputed index, not a fresh scan per import.
         candidate = remainder.replace(".", "/")
-        suffixes = (f"/{candidate}.py", f"/{candidate}/__init__.py")
-        matches = {p for p in known_paths if p == f"{candidate}.py" or any(p.endswith(s) for s in suffixes)}
+        matches = suffix_index.get(f"{candidate}.py", set()) | suffix_index.get(f"{candidate}/__init__.py", set())
         return next(iter(matches)) if len(matches) == 1 else None
 
     # Relative import: one leading dot means "this file's own package" (i.e.
@@ -81,11 +99,14 @@ def resolve_dependencies(
     file_imports: dict[str, tuple[str, list[str]]], known_paths: set[str]
 ) -> list[DependencyEdge]:
     """Resolve every file's imports to edges. `file_imports` maps each file path to (language, [module strings])."""
+    suffix_index = build_suffix_index(known_paths)
     edges: set[DependencyEdge] = set()
     for from_path, (language, modules) in file_imports.items():
         for module in modules:
-            resolver = resolve_python_import if language == "python" else resolve_js_import
-            to_path = resolver(from_path, module, known_paths)
+            if language == "python":
+                to_path = resolve_python_import(from_path, module, known_paths, suffix_index)
+            else:
+                to_path = resolve_js_import(from_path, module, known_paths)
             if to_path is not None and to_path != from_path:
                 edges.add(DependencyEdge(from_path=from_path, to_path=to_path))
     return list(edges)
