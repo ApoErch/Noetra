@@ -16,16 +16,18 @@ export type Repo = {
 // "cloning" itself must stay non-openable or a big repo shows an empty tree.
 const OPENABLE_STATUSES = new Set(['parsing', 'graphing', 'chunking', 'embedding', 'metrics', 'ready'])
 
+// Each pipeline stage gets its own hue (in pipeline order) so the badge
+// itself communicates progress, not just "still working" vs. "done".
 const STATUS_STYLES: Record<string, string> = {
-  ready: 'bg-emerald-500/10 text-emerald-400 ring-emerald-500/20',
-  failed: 'bg-red-500/10 text-red-400 ring-red-500/20',
   queued: 'bg-zinc-800 text-zinc-300 ring-zinc-700',
   cloning: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
-  parsing: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
-  graphing: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
-  chunking: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
-  embedding: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
-  metrics: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
+  parsing: 'bg-blue-500/10 text-blue-400 ring-blue-500/20',
+  graphing: 'bg-violet-500/10 text-violet-400 ring-violet-500/20',
+  chunking: 'bg-fuchsia-500/10 text-fuchsia-400 ring-fuchsia-500/20',
+  embedding: 'bg-cyan-500/10 text-cyan-400 ring-cyan-500/20',
+  metrics: 'bg-teal-500/10 text-teal-400 ring-teal-500/20',
+  ready: 'bg-emerald-500/10 text-emerald-400 ring-emerald-500/20',
+  failed: 'bg-red-500/10 text-red-400 ring-red-500/20',
 }
 
 function StatusBadge({ status }: { status: string }) {
