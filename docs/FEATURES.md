@@ -26,6 +26,10 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
   "How do payments work?"
 - **LangGraph agent** with retrieval tools (`code_search`, `find_symbol`, `read_file`,
   `list_dependencies`). Iterates like a developer exploring the repo. See `RETRIEVAL.md`.
+- Oriented by an AI-free **repo map** — a PageRank-ranked table of contents (top symbols per
+  file, ranked by import-graph centrality) in the prompt prefix, so the agent's first search
+  is informed rather than a blind guess. Built in milestone 6 from `code_entity` +
+  `dependency_edge`. See `RETRIEVAL.md`.
 - Streamed answers, each citing concrete `file:line` locations rendered as links into Monaco.
   Citations are built from tool-result metadata, never from what the model says it read.
 - Build note: ships **directly as the agent** (milestone 6) — there is no single-shot RAG
@@ -41,12 +45,13 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
 - Hybrid retrieval: lexical + structural + semantic, RRF-fused, then reranked
   (`RETRIEVAL.md`).
 - Ranked results with `file:line` + one-line context. Click → open in Monaco at that line.
-- Build note: ships in milestone 5 with **lexical + structural only** and gains the
-  semantic leg in milestone 7. The endpoint contract and the UI don't change between the
-  two — only what's behind `core/retrieval` does. Shipping it early is what proves the
-  citation path end-to-end and gives the eval harness something to measure.
+- Build note: ships in milestone 5 with **lexical + structural only** and *may* gain the
+  semantic leg in milestone 7 — only if the eval set justifies it (see `RETRIEVAL.md`). The
+  endpoint contract and the UI don't change either way — only what's behind `core/retrieval`
+  does. Shipping it early is what proves the citation path end-to-end and gives the eval
+  harness something to measure.
 - Lexical results are available as soon as `status` passes `cloning`, the same as the file
-  tree; symbol lookup needs `parsing`; the semantic leg needs `ready`.
+  tree; symbol lookup needs `parsing`; the semantic leg (if built) needs `ready`.
 
 ## 6. Repository dashboard  *(basic metrics only)*
 - Header counts: file count, function count, total LOC.

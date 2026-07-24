@@ -121,9 +121,16 @@ Progress is logged in `docs/LEARNING_LOG.md`. **Done: M1 Skeleton, M2 Auth.**
    the scoreboard every later retrieval change is judged against.
 6. Chat agent (LangGraph: `code_search`, `find_symbol`, `read_file`, `list_dependencies`;
    multi-step loop, streamed, cited) — ship-quality MVP. All four tools have real data
-   behind them by now.
-7. AST chunking + embeddings (chunk by function/class → pgvector) + the semantic leg, RRF
-   fusion, and reranking. Entered with a measured baseline and a known list of failures.
+   behind them by now. The agent is oriented by a **repo map** — a PageRank-ranked, AI-free
+   "table of contents" (top symbols per file, ranked by import-graph centrality) built from
+   `code_entity` + `dependency_edge` and placed in the stable prompt prefix, so the agent's
+   first move is informed instead of a blind keyword guess. See `RETRIEVAL.md`.
+7. **(Conditional)** AST chunking + embeddings (chunk by function/class → pgvector) + the
+   semantic leg and reranking — built **only if** the M5 eval set shows the cheap
+   lexical + structural + agent + repo-map stack actually failing questions that embeddings
+   would fix. Entered with a measured baseline and a known list of failures; if the baseline
+   already clears the bar, this milestone may never be built. **No retriever joins the
+   fusion without a `recall@k` movement that justifies it.**
 8. Basic metrics + dashboard
 
 Milestone 7 is where the old plan's steps 5–6 went, and the old "chat v1 single-shot RAG

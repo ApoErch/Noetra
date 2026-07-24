@@ -101,6 +101,32 @@ The agent iterates like a developer: search → read a result → realize it nee
 search again → answer. Every answer cites concrete `file:line` locations pulled from
 tool results.
 
+### Repo map (agent orientation)
+
+Agentic search has one weak moment: the *first* tool call. The agent lands in a repo it has
+never seen and has to guess a search term with no sense of the codebase's shape — worst of
+all on vague questions ("how is auth implemented?") where the right keyword isn't obvious.
+A wrong first guess means wandering or a miss. This is the same thing Claude Code does
+(grep → read → follow → answer, never loading the whole repo), and it's where that style is
+weakest.
+
+The fix is a **repo map**: a compressed, names-only table of contents — each file with its
+top-level symbols, no bodies — placed in the stable prompt prefix *before* the agent's first
+move, so it orients from a floor plan instead of guessing blind. Same idea aider uses.
+
+It's built entirely from data M4 already persisted — **no AI calls, no embeddings**:
+`code_entity` supplies the symbol names, `dependency_edge` supplies the import graph. A big
+repo has too many symbols to show them all, so rank them with **PageRank over the import
+graph**: a file that many files import is probably central, so its symbols earn a spot on
+the map; leaf files nobody imports get trimmed. Known caveat: raw centrality over-ranks
+generic utilities (a `utils.py` everyone imports floats to the top), which PageRank dampens
+but doesn't eliminate — acceptable, because the map only needs to *orient* the agent, which
+then verifies by reading real files.
+
+Ships in **M6** with the agent (it's an orientation tool, not a fusion retriever), and lives
+in the byte-stable prompt prefix — so OpenAI's automatic prompt caching keeps it free on
+every follow-up question about the same repo (see the Latency-budget note above).
+
 **Citations come from tool-result metadata, never from the model.** The retriever already
 knows the file and line range of every hit; carry that through and render it. Asking the
 model to report where it found something invites it to drift a few lines, or to cite a file
@@ -122,7 +148,7 @@ expensive one.**
 |---|---|---|---|
 | Lexical | one migration (`tsvector` over `file.content`, which clone already persists) | trivial | M4 |
 | Structural | falls out of the symbol table you're building anyway | trivial | M4 |
-| Semantic | chunking + embedding pipeline + pgvector index + tuning | **re-embed the entire corpus** | M7 |
+| Semantic | chunking + embedding pipeline + pgvector index + tuning | **re-embed the entire corpus** | M7 (conditional) |
 
 The asymmetry in the third column is the whole argument. Chunking strategy is the thing
 most likely to change once you see real queries fail — and changing it means paying the
@@ -136,6 +162,10 @@ which one is at fault. Starting with one gives you a clean baseline to attribute
 later regression against.
 
 **The rule: no retriever joins the fusion without a `recall@k` movement that justifies it.**
+This makes semantic retrieval **conditional**: if lexical + structural + the agent + the
+repo map already clear the eval bar, M7 is not built at all. Embeddings have to *earn* their
+slot by moving `recall@k` on questions the cheap stack demonstrably fails — they are not a
+foregone conclusion.
 
 ## Evaluation
 
