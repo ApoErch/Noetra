@@ -848,3 +848,69 @@ generated comments.
 diffing autogenerate tool, not specific to this index or to Noetra.
 
 **Docs:** [Alembic — autogenerate limitations](https://alembic.sqlalchemy.org/en/latest/autogenerate.html#what-does-autogenerate-detect-and-what-does-it-not-detect)
+
+---
+
+## Precomputed index vs. repeated linear scan (a classic time/space trade-off)
+
+**The bug:** resolving one Python absolute import (`import pkg.mod`) to an actual file
+scanned *every* known file path in the repo, checking if any of them ended with the
+right suffix. Fine on a 12-file repo. On `tensorflow/tensorflow` (36k files, thousands
+of absolute imports), that's thousands of full 36k-item scans — tens to hundreds of
+millions of string comparisons, and it showed up as an ~8-minute stall.
+
+**The fix:** build one lookup structure — a dict mapping every possible path *suffix*
+(`"mod.py"`, `"pkg/mod.py"`, `"src/pkg/mod.py"`, ...) to the real path(s) that end that
+way — **once per repo**, before resolving any imports. After that, each import is a
+single dict lookup (O(1) on average) instead of a fresh scan.
+
+**The general pattern:** this is "do a little more work up front (build an index) to
+make every later lookup cheap," the same idea behind a database index, a hash map, or a
+compiler's symbol table. It costs a bit of memory and a one-time pass over the data; it
+pays for itself the moment you look something up more than once. The tell that you need
+one: doing the *same kind* of scan repeatedly over data that isn't changing between
+scans.
+
+**How it's used in Noetra:** `indexer/graph.py`'s `build_suffix_index`, called once per
+repo inside `resolve_dependencies` before the per-import resolution loop.
+
+**Is this standard?** Yes — recognizing "O(n) work happening inside a loop that runs m
+times, when the data being scanned doesn't change" as an O(n×m) bug, and fixing it with a
+precomputed index, is one of the most common real-world performance fixes there is.
+
+---
+
+## Deferred cleanup: the fast path deletes the record, a background task cleans up the side effect
+
+**The gap:** deleting a repo removed its database rows (correctly, via Postgres's own
+cascading foreign keys) but left its cloned files sitting on disk forever — nothing ever
+told the worker's storage volume that repo was gone.
+
+**Why the fix isn't "just call `shutil.rmtree` in the delete endpoint":** the clone
+directory can be many gigabytes with tens of thousands of files; deleting it can take
+real time. `CLAUDE.md`'s module boundary already draws this line elsewhere in the
+project — `api` is the fast HTTP layer and must never do slow, repo-touching work
+inline; that always belongs in a `worker` background task. Deleting a repo is no
+different from cloning one in that respect.
+
+**The pattern:** the API deletes the *authoritative* record (the DB row) and returns
+immediately — from the user's perspective, the repo is already gone. It then enqueues a
+Celery task to clean up the *derived* side effect (the on-disk files) whenever the
+worker gets to it. The two don't need to happen atomically together: nothing else in the
+system reads that directory once the DB row is gone, so a short delay before the actual
+disk space is reclaimed is harmless.
+
+**Why this matters generally:** this is a small instance of a common distributed-systems
+shape — separating "the operation the user is waiting on" (fast, synchronous, strongly
+consistent) from "necessary cleanup of a side effect" (slow, asynchronous, only
+eventually consistent). Trying to make both parts happen together, synchronously, is
+what leads to slow endpoints or half-finished operations when the slow part fails.
+
+**How it's used in Noetra:** `api/repos.py`'s `delete_repository` deletes the `Repository`
+row, then `celery_app.send_task("worker.tasks.delete_repository_clone", ...)`; the new
+`worker.tasks.delete_repository_clone` task does the actual `shutil.rmtree`.
+
+**Is this standard?** Yes — "delete the record now, clean up storage later via a
+background job" is the standard shape for any resource with an expensive-to-remove
+side effect (large file uploads, temp directories, cache entries tied to a deleted
+record, etc.).

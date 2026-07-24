@@ -2,7 +2,10 @@ import base64
 import hashlib
 import shutil
 import subprocess
+import time
 from pathlib import Path
+
+from celery.utils.log import get_task_logger
 
 from core.celery_app import celery_app
 from core.config import get_settings
@@ -25,6 +28,11 @@ from indexer.parser import detect_language, extract
 CLONE_TIMEOUT_SECONDS = 300
 MAX_FILE_SIZE_BYTES = 1_000_000
 
+# `get_task_logger` (not the stdlib `logging` module directly) is the Celery-standard
+# way to log from inside a task — it nests under Celery's own logger so these lines
+# inherit the worker's --loglevel and log formatting instead of needing separate setup.
+logger = get_task_logger(__name__)
+
 
 def _hash_file(path: Path, chunk_size: int = 1 << 20) -> str:
     """SHA-256 a file in chunks instead of loading it whole into memory — matters for files too large to store content for."""
@@ -39,6 +47,8 @@ def _hash_file(path: Path, chunk_size: int = 1 << 20) -> str:
 def clone_repository(repository_id: str) -> None:
     """Clone a queued `Repository` into local storage using its owner's decrypted GitHub token, updating status as it goes."""
     db = SessionLocal()
+    task_start = time.perf_counter()
+    stage_start = task_start
     try:
         repo = db.get(Repository, repository_id)
         if repo is None:
@@ -189,6 +199,9 @@ def clone_repository(repository_id: str) -> None:
         # file's raw imports are kept in memory (not persisted) for the
         # graphing stage right below — no reason to persist unresolved import
         # strings when resolution happens in the very next step of this task.
+        logger.info("repo %s: clone stage took %.2fs", repository_id, time.perf_counter() - stage_start)
+        stage_start = time.perf_counter()
+
         repo.status = RepositoryStatus.PARSING
         db.commit()
 
@@ -230,6 +243,9 @@ def clone_repository(repository_id: str) -> None:
         # file's imports against every path this repo actually has, then
         # persisted as `dependency_edges`. Bare/third-party specifiers (stdlib,
         # npm packages) resolve to nothing and are silently dropped.
+        logger.info("repo %s: parse stage took %.2fs", repository_id, time.perf_counter() - stage_start)
+        stage_start = time.perf_counter()
+
         repo.status = RepositoryStatus.GRAPHING
         db.commit()
 
@@ -245,6 +261,9 @@ def clone_repository(repository_id: str) -> None:
                 )
             )
         db.commit()
+
+        logger.info("repo %s: graph stage took %.2fs", repository_id, time.perf_counter() - stage_start)
+        logger.info("repo %s: full pipeline took %.2fs", repository_id, time.perf_counter() - task_start)
 
         # Chunking/embedding/metrics don't exist yet, so status stays at
         # GRAPHING — the last stage actually completed — rather than jumping

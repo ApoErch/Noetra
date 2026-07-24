@@ -159,3 +159,21 @@ Most recent entry last. Written by `/endsession`.
 - Nested closures/helper defs inside a function body are deliberately not extracted as separate entities (kept the symbol table to top-level/class-member shapes).
 **Next step:** Milestone 5 — eval harness (~40 pinned questions → `recall@k`) + search endpoint/UI over lexical + structural retrieval. First real user-facing surface for everything built in M4.
 **Watch out for:** Postgres enums added via `ALTER TABLE` (not `CREATE TABLE`) don't auto-create their type — hit this once already (`file_language`); if a similar enum column gets added to an existing table later, remember the explicit `.create(op.get_bind(), checkfirst=True)` + `create_type=False` pattern in `4e35f936f155`. Also: alembic autogenerate can't see hand-written raw-SQL indexes (the GIN ones) in its model diff and will propose dropping them on any later table change — always read a generated migration's `upgrade()`/`downgrade()` before applying, don't just autogenerate-and-run.
+
+---
+
+## Session — 2026-07-24 04:41
+
+**Worked on:** Manual QA of Milestone 4 against real imports (own repo + `tensorflow/tensorflow`), which surfaced and fixed one frontend regression and two real backend gaps.
+**Done:**
+- Frontend `RepoList.tsx` had `OPENABLE_STATUSES`/the Remove button both hardcoded to `status === 'ready'` from before M4 existed — since the pipeline now legitimately parks at `GRAPHING` (chunking/embedding/metrics don't exist yet), repos could no longer be opened or removed at all. Fixed both to key off the real post-clone stage set; also caught and corrected a first-pass mistake that included `cloning` itself as openable (file rows aren't committed until `cloning` *finishes*, so a large repo briefly showed an empty tree).
+- Confirmed via `git status`/DB query that `Repository` deletion cascades cleanly through `files` → `code_entities`/`dependency_edges` via Postgres `ON DELETE CASCADE` — no app code does the cascading.
+- Found a real perf bug testing against `tensorflow/tensorflow` (36k files): the graphing stage took ~10 minutes total, ~8 of which was import resolution alone. Root cause: `resolve_python_import`'s absolute-import path did a full linear scan over every known file path for every single absolute import (O(imports × files)). Fixed with `build_suffix_index` — a reverse index (every path suffix → matching paths) built once per repo, turning each lookup into O(1). Verified ~10,000x speedup via a synthetic stress test at the same scale, with identical resolution output on all existing correctness tests.
+- Found that `delete_repository` never cleaned up the on-disk clone directory (only the DB rows cascade) — an orphan that grows forever and eventually risks filling the shared disk. Fixed by adding a `worker.tasks.delete_repository_clone` Celery task, enqueued by the API after the DB delete (kept off the request thread, consistent with "anything touching a repo is a Celery task" from `CLAUDE.md`). Verified end-to-end and cleared 17 pre-existing orphaned clone directories left over from this session's testing.
+- Committed all of the above across several focused commits.
+**In progress:** Nothing code-wise.
+**Key decisions:**
+- Disk cleanup on delete is itself a background Celery task, not inline in the `DELETE` endpoint — a large repo's `rmtree` could be slow, and `api` should never do slow/repo-touching work inline.
+- No repo-size cap or disk-usage alerting added — the immediate leak (never cleaning up at all) is fixed; monitoring total disk usage is a separate, not-yet-needed concern.
+**Next step:** Milestone 5 — eval harness (~40 pinned questions → `recall@k`) + search endpoint/UI over lexical + structural retrieval, per `CLAUDE.md`'s build order. Still the next unstarted milestone.
+**Watch out for:** All `Repository` rows were deleted during this session's manual testing — the DB is currently empty of repos, and `/data/repos` was wiped clean to match (nothing orphaned left over). Also: `docker compose exec` on Windows/Git Bash mangles absolute Unix paths like `/data/repos` into Windows paths — prefix with `MSYS_NO_PATHCONV=1` when running shell commands against a container that need a literal leading-slash path.
