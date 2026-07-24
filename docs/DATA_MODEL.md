@@ -20,10 +20,10 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/db`. Everything scoped by
 |-------|------|-------|
 | id | uuid (pk) | |
 | user_id | uuid (fk → user) | owner |
-| source | enum | `github_public` \| `github_private` \| `zip` |
+| source | enum | `github_public` \| `github_private` \|
 | full_name | text | e.g. `microsoft/vscode` |
-| clone_url | text | nullable for zip |
-| status | enum | `queued\|cloning\|parsing\|chunking\|embedding\|graphing\|metrics\|ready\|failed` |
+| clone_url | text |
+| status | enum | `queued\|cloning\|parsing\|graphing\|chunking\|embedding\|metrics\|ready\|failed` (advanced in that order — see `WORKFLOW.md`) |
 | progress | int | 0–100 |
 | error | text | nullable |
 | indexed_at | timestamptz | nullable |
@@ -35,9 +35,12 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/db`. Everything scoped by
 | id | uuid (pk) | |
 | repository_id | uuid (fk) | |
 | path | text | repo-relative |
-| language | enum | `python\|javascript\|typescript` |
+| language | enum, nullable | `python\|javascript\|typescript`; null for non-parsed files (e.g. `.md`, `.json`) |
+| content | text, nullable | full raw file source; populated at clone time for every tracked file (`git ls-files`), not just py/js/ts |
+| is_binary | boolean | true for images/compiled assets/etc — `content` stays null, file endpoint returns "can't preview this" instead of dumping binary into a TEXT column |
 | content_hash | text | incremental re-index |
-| loc | int | lines of code |
+| loc | int, nullable | lines of code; only set for parsed languages |
+| content_tsv | tsvector, generated | **powers lexical retrieval.** A Postgres *generated* column (`to_tsvector('english', coalesce(content, ''))`) with a GIN index — it maintains itself on every insert/update, so there is no indexing step to run and nothing to keep in sync. Created in the same migration as the table's M4 changes, which is what makes search work the moment cloning finishes. |
 
 ### code_entity  *(the symbol table — powers structural retrieval)*
 | field | type | notes |
@@ -60,8 +63,9 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/db`. Everything scoped by
 | entity_id | uuid (fk → code_entity) | nullable |
 | start_line | int | |
 | end_line | int | |
-| content | text | the chunk source |
-| embedding | vector(N) | pgvector; N = embedding dim |
+| content | text | the chunk source, as returned to the model |
+| embed_text | text | what was actually embedded: the context prefix (`path › class › signature`) plus `content`. Stored so a re-embed is reproducible and so you can see what the model saw. See `RETRIEVAL.md` → chunking rule. |
+| embedding | vector(1536) | pgvector. 1536 = OpenAI `text-embedding-3-small`. Switching to `-large` means `vector(3072)` and a migration + full re-embed — or use OpenAI's `dimensions` parameter to truncate `-large` down to 1536 and keep the column as-is. |
 
 ### dependency_edge  *(import graph — powers `list_dependencies`; V2 architecture view)*
 | field | type | notes |
@@ -103,12 +107,21 @@ user 1───* repository 1───* file 1───* code_entity
                        └───* chat_message
 ```
 
-## Indexes to add early
+## Indexes, and when each lands
 
-- `code_entity(repository_id, name)` — structural symbol lookup
-- `file` full-text (`tsvector`) + `pg_trgm` on content/identifiers — lexical retrieval
-- pgvector index (HNSW or IVFFlat) on `chunk.embedding` — semantic retrieval
-- `file(repository_id, content_hash)` — incremental re-index
+"Early" is doing real work here — the first two arrive well before the third, and that
+staging is what the build order in `CLAUDE.md` rests on.
+
+| index | purpose | milestone |
+|-------|---------|-----------|
+| GIN on `file.content_tsv` + `pg_trgm` on `code_entity.name` | lexical retrieval | **M4** — one migration, no pipeline cost |
+| `code_entity(repository_id, name)` | structural symbol lookup | **M4** |
+| `file(repository_id, content_hash)` | incremental re-index | **M4** |
+| HNSW on `chunk.embedding` | semantic retrieval | **M7** — after evals justify it |
+
+HNSW over IVFFlat for the vector index: it needs no training step and no "how many lists?"
+tuning pass, and query recall is better at V1 scale. IVFFlat wins on build time at very
+large row counts, which is not a problem V1 has.
 
 ## Deferred to V2 (not created in V1)
 

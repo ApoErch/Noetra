@@ -1,0 +1,19 @@
+# env
+.env
+
+# python
+__pycache__/
+*.pyc
+backend/.venv/
+
+# node
+web/node_modules/
+web/dist/
+
+# docker/data
+data/repos/
+
+# editors/os
+.vscode/
+.idea/
+.DS_Store

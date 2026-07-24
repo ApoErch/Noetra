@@ -1,180 +1,166 @@
 # Noetra — Engineering Intelligence Platform
 
-> Working name: **Noetra** (rename freely). A SaaS product that connects to a GitHub
-> repository, indexes it in the background, and lets you *talk to and search* the
-> codebase through an AI agent that answers with exact file + line citations.
+Point Noetra at a GitHub repo → it clones, indexes, and lets you **chat with and
+search** the codebase through an AI agent that answers with exact file + line
+citations. Grounded QA over a codebase is the product; **retrieval quality is the
+whole game** (see `docs/RETRIEVAL.md`).
 
-**This file is the entry point.** Read it fully before writing code, then pull in the
-relevant file from `docs/` for detail.
+## Session start (do this first)
 
----
+Read the newest entry in `docs/SESSION_LOG.md` to pick up where the last session left
+off. If it doesn't exist yet, skip this. (The `/endsession` skill writes those entries.)
 
-## What we're building (one line)
+## How I work with you — mentoring mode (applies to every task)
 
-Point Noetra at a repo → it clones, parses, and indexes the codebase → the user gets an
-AI agent they can ask questions of and search in plain English, grounded in the real
-code with citations.
+I'm building Noetra to **learn**, so teach as you build.
 
-## How to work with me — mentoring mode (applies from message one, always)
+**IMPORTANT: explain your reasoning, not just your conclusion.** When you decide we need
+something (e.g. "add a session secret"), first tell me *how you got there and why* —
+your approach to the problem — then implement. Never hand me a decision with no path to it.
 
-I'm building this to learn, not just to ship it. This is a standing instruction
-across every milestone from the first commit onward — it does not wait until things
-get "advanced."
+**Who I am:** junior SWE, ~1.5 YOE. Building this to learn, then to compete for junior
+SWE and junior AI / data / ML roles at strong (tier A–S) companies.
+- **I know the basics of (don't re-teach):** React, TypeScript, FastAPI, Python,
+  C#/Unity, LangGraph.
+- **New to me (explain the first time it appears):** Celery, Redis, Tree-sitter,
+  pgvector, deep Docker, AWS — and most of auth/security, networking, databases,
+  distributed systems, and retrieval. **When unsure whether I know something, assume I
+  don't.** Knowing FastAPI basics ≠ knowing web-session security — don't skip a concept
+  just because it sits next to one I know.
 
-**Explain, unprompted, whenever something crosses the junior-engineer line:**
-- Any architectural decision — why this component boundary, why data flows this way,
-  why async work is a job and not inline, why hybrid retrieval over pure vector search
-- Any function or class whose logic isn't obvious top-to-bottom — non-trivial control
-  flow, concurrency, recursion, anything with more than one "clever" step
-- Any multi-step sequence of events — the indexing pipeline, a request lifecycle, the
-  agent's tool-calling loop — walk through *why* it happens in that order, not just
-  that it works
-- Any new tool, library, or pattern not yet used in this project (Tree-sitter, Celery,
-  pgvector, LangGraph, RRF, etc.) the first time it's introduced
+**Keep explanations tight:** simple words + one concrete example or analogy; define any
+term in the same breath; **name the pattern** ("this is reciprocal rank fusion") so I can
+look it up; give the real trade-off (what else we could do, why this wins); link the
+**official** docs. Idea + reason + example + link — no walls of text.
 
-**Don't over-explain:** boilerplate, standard CRUD, straightforward glue code —
-anything a mid-level engineer reads in two seconds without a note. Calibrate to real
-complexity, the same judgment a good mentor uses to decide when a junior needs a
-pointer versus when they're fine alone.
+**Teach system design, not just this file.** For architectural choices, name the general
+pattern, the alternatives, and where the same trade-off shows up in industry. Call out
+classic trade-offs by name (consistency vs. availability, latency vs. throughput,
+coupling vs. duplication).
 
-**What "explaining" means:**
-- Say *why*, not just *what*
-- Name the underlying concept or pattern explicitly (e.g. "this is the Repository
-  pattern," "this is reciprocal rank fusion," "this is a producer/consumer queue") so
-  it's something to look up later and recognize in an interview
-- Walk real tradeoffs instead of asserting the answer
-- Flag explicitly when something is a good interview talking point — a line like
-  "this is worth being able to explain if asked" is enough
+**When you add or wire a new file, show me how it fits:** where it lives, who calls it /
+what it calls, the data flow through it, and what I'll see when it runs. A quick arrow
+sketch is ideal.
 
-**After each milestone**, append a short entry to `docs/LEARNING_LOG.md`: what was
-built, the core concept(s), and a 2-3 sentence recruiter-ready explanation.
+**IMPORTANT — do it the standard way, not the fancy way.** Use the correct,
+industry-standard approach for each area (auth, DB access, API design, error handling),
+and tell me when something *is* the standard. **Don't over-engineer** — no extra
+abstraction, defensive layers, or speculative generality I didn't ask for. When you
+finish an area, finish it cleanly: no dead code, stubs, or half-wired leftovers.
 
-Goal: by the end, every non-trivial piece of this project should be something I can
-explain unprompted, at a mid-level-engineer standard, to an interviewer.
+**Approval gate:** before running any command, state it, say what it does and why, then
+**wait for my go-ahead**. Never explain-then-run in the same turn.
 
-## The core bet
+## V1 scope
 
-This product is *grounded question-answering over a codebase*. Chat + search are the
-product; everything else is a read on top of the same index. **Retrieval quality is the
-whole game.** See `docs/RETRIEVAL.md` — it's the most important doc here.
+GitHub OAuth login (required before any import) · repo import — public URL (plain clone) or private repo (clone with the user's decrypted token) · background indexing
+pipeline (clone+lexical index → parse+symbols → graph → chunk → embed → metrics) ·
+**hybrid retrieval** (lexical + structural + semantic, RRF-fused) · a **retrieval eval
+set** that keeps that hybrid honest · streamed LangGraph chat agent with citations ·
+hybrid search · basic dashboard (files, functions, LOC, language breakdown, largest files).
 
-## V1 scope (build this)
+That arrow chain is the **pipeline order** — what happens during a single indexing run of
+one repo, every time. Don't confuse it with the **build order** below, which is the
+sequence in which the code gets written over the life of the project. They're separate
+decisions that happen to follow the same principle: *cheap and deterministic first, slow
+and expensive last.*
 
-1. GitHub OAuth login
-2. Repository import — public URL, private repo (OAuth), or ZIP upload
-3. Background indexing pipeline (clone → parse → chunk → embed → symbol/graph → basic metrics)
-4. **Hybrid retrieval** (lexical + structural + semantic)
-5. AI Chat — LangGraph agent over the retriever, streamed, with citations
-6. Natural-language semantic search
-7. Repository dashboard — **basic metrics only** (files, functions, LOC, language breakdown, largest files)
+In the pipeline, that means the lexical index, symbol table, and import graph all finish
+before chunking and embedding start — so a repo becomes searchable minutes into indexing
+rather than only when the slowest stage completes.
 
-**Languages at launch: Python, JavaScript, TypeScript.** Nothing else in V1.
+**Languages at launch:** Python, JavaScript, TypeScript. Nothing else.
 
-## Explicitly OUT of scope for V1 (deferred to V2)
+**Deferred to V2 (leave clean extension points, don't build):** security scanner,
+architecture graph viz (React Flow), AI code/PR review, advanced metrics.
 
-- **Security scanner**
-- **Architecture graph view** (React Flow) — the dependency data is still built in V1,
-  but no visualization is shipped
-- **AI Code Review** (per-file issue detection)
-- **Pull Request Review**
-- **Advanced metrics** (dead code, duplicates, unused imports, complexity, ownership)
+## Stack
 
-Leave clean extension points, nothing more.
+React + TS + Tailwind + Monaco + TanStack Query · FastAPI + Pydantic v2 + SQLAlchemy ·
+Celery + Redis · Postgres + pgvector · Tree-sitter · **OpenAI API for chat + embeddings**
+(`text-embedding-3-small`, 1536 dims). Both **must stay behind one interface in `core/ai`**
+so the provider is swappable — nothing outside `core/ai` imports the OpenAI SDK.
+Docker Compose local, GitHub Actions CI, AWS deploy (`docs/DEPLOYMENT.md`).
 
----
+## Module boundaries (respect these when adding code)
 
-## Tech stack
+Structure is already built — read the real tree from the repo. What matters is intent:
+- `backend/api` — FastAPI: auth, REST, retrieval + agent endpoints. **HTTP boundary
+  only; no slow work inline.**
+- `backend/worker` — Celery tasks: the indexing pipeline. **All slow / repo-touching
+  work lives here.**
+- `backend/core` — shared: DB models, schemas, GitHub client, `ai` + embeddings,
+  retrieval, agent graph.
+- `backend/indexer` — pure parsing (Tree-sitter, AST chunking, symbol table, dep graph).
+  **No DB, no HTTP** — stays unit-testable in isolation.
 
-**Frontend:** React + TypeScript, Tailwind CSS, Monaco Editor, TanStack Query.
-(React Flow deferred with the V2 architecture view.)
+**Rules:** `api` and `worker` import `core` and `indexer`; `indexer` imports neither.
+Retrieval lives **only** in `core/retrieval`.
 
-**Backend:** **FastAPI (Python)**, Pydantic v2, SQLAlchemy.
+## Build order (each milestone runs end-to-end before the next)
 
-**Worker / queue:** **Celery + Redis** (broker + result/status).
+**Ordering principle: build retrievers in cost order — cheap first, measure, then buy the
+expensive one.** Lexical search is cheap to build and cheap to throw away. Embeddings are
+neither: changing the chunking strategy means re-embedding the whole corpus, and that
+strategy is exactly what tends to change after first contact with real failing queries.
+So the eval set and the citation UI land *before* pgvector, and semantic retrieval has to
+earn its slot by moving `recall@k` on questions the cheap retrievers demonstrably fail.
 
-**Database:** PostgreSQL + **pgvector**.
+This works because `file.content` is already persisted at clone time (M3). A Postgres
+`tsvector` index over it is one migration and zero pipeline cost, which is enough
+retrieval to build the agent and the whole citation path against.
 
-**Parsing:** Tree-sitter (python, javascript, typescript grammars).
+Progress is logged in `docs/LEARNING_LOG.md`. **Done: M1 Skeleton, M2 Auth.**
+**Done M3. Import + clone (enqueue Celery job, clone, persist `Repository` + status)**
+4. Parse + extract (Tree-sitter py/js/ts → files + entities = the symbol table), plus the
+   two things that ride along free with it: the **lexical index** (`tsvector` + `pg_trgm`)
+   and the **dependency graph** (resolve the imports the parser already extracted). No AI
+   calls in this milestone at all.
+5. **Eval harness** (~40 questions with known answer locations → `recall@k`) + search
+   endpoint & UI over lexical + structural. First end-to-end `file:line` citations, and
+   the scoreboard every later retrieval change is judged against.
+6. Chat agent (LangGraph: `code_search`, `find_symbol`, `read_file`, `list_dependencies`;
+   multi-step loop, streamed, cited) — ship-quality MVP. All four tools have real data
+   behind them by now. The agent is oriented by a **repo map** — a PageRank-ranked, AI-free
+   "table of contents" (top symbols per file, ranked by import-graph centrality) built from
+   `code_entity` + `dependency_edge` and placed in the stable prompt prefix, so the agent's
+   first move is informed instead of a blind keyword guess. See `RETRIEVAL.md`.
+7. **(Conditional)** AST chunking + embeddings (chunk by function/class → pgvector) + the
+   semantic leg and reranking — built **only if** the M5 eval set shows the cheap
+   lexical + structural + agent + repo-map stack actually failing questions that embeddings
+   would fix. Entered with a measured baseline and a known list of failures; if the baseline
+   already clears the bar, this milestone may never be built. **No retriever joins the
+   fusion without a `recall@k` movement that justifies it.**
+8. Basic metrics + dashboard
 
-**AI:** Anthropic API (chat + summaries). **Embeddings: provider TBD** — chosen at
-implementation time (candidates: a code-specialized model like Voyage `voyage-code`,
-OpenAI, or a local model). Keep the embedding provider behind one interface in `core/ai`
-so the decision is deferred and swappable.
-
-**Agent:** **LangGraph** — the chat agent with retrieval tools.
-
-**Infra:** GitHub OAuth + GitHub API, Docker (essential), Docker Compose (local),
-GitHub Actions (CI). **Deployed live on AWS** — right-sized, see `docs/DEPLOYMENT.md`.
-
----
-
-## Repository structure (target)
-
-Python monorepo (one venv via `uv` or Poetry) + a separate React app.
-
-```
-/web                 # React + TS frontend (own package.json)
-/backend
-  /api               # FastAPI app: auth, REST, retrieval, agent endpoint
-  /worker            # Celery tasks: the indexing pipeline
-  /core              # shared: db models, schemas, github client, ai + embeddings, retrieval, agent graph
-  /indexer           # tree-sitter parsing, AST chunking, symbol table, dependency graph
-  pyproject.toml
-docker-compose.yml
-/docs
-```
-
-`api` and `worker` both import `core` and `indexer`. `indexer` is pure logic (no DB, no
-HTTP) so it's unit-testable. Frontend types are generated from the FastAPI OpenAPI schema.
-
----
-
-## Build order (milestones)
-
-Each milestone runs end-to-end before the next.
-
-1. **Skeleton** — monorepo, Docker Compose (Postgres + Redis), FastAPI boots, React boots, `core` package with DB + models.
-2. **Auth** — GitHub OAuth, session, "my repositories" from the GitHub API.
-3. **Import + clone** — accept a repo, enqueue a Celery job, clone into worker storage, persist `Repository` with status.
-4. **Parse + extract** — Tree-sitter walk (py/js/ts), extract files + entities (functions/classes) into DB. This builds the **symbol table**.
-5. **AST chunking + embeddings** — chunk by function/class, embed, store in pgvector. Build the dependency edges here too.
-6. **Hybrid retrieval** — lexical + structural + semantic, fused. Semantic search endpoint + UI. (`docs/RETRIEVAL.md`)
-7. **Chat v1 — single-shot RAG** over the hybrid retriever. Streamed, with citations. *This is a usable MVP checkpoint — ship-quality before moving on.*
-8. **Chat v2 — LangGraph agent** with tools (`code_search`, `find_symbol`, `read_file`, `list_dependencies`), multi-step retrieval loop.
-9. **Basic metrics + dashboard** — aggregate counts + language breakdown + largest files; repository dashboard UI.
-
-Milestones 3–9 all hang off the indexing pipeline — see `docs/WORKFLOW.md`.
-
----
+Milestone 7 is where the old plan's steps 5–6 went, and the old "chat v1 single-shot RAG
+then chat v2 agent" split collapsed into milestone 6 — see `docs/FEATURES.md` §4 for why
+shipping the agent directly is the smaller piece of work, not the larger one.
 
 ## Conventions
 
-- **Python** backend, **TypeScript** frontend. Strict typing both sides (mypy / TS strict).
-- **API:** REST under `/api/v1`. Request/response models are Pydantic; validated at the boundary.
-- **Async work is never inline** — anything touching a repo (clone/parse/embed) is a
-  Celery task in `worker`, never in the request cycle.
-- **Status is first-class** — every repo has an indexing status
-  (`queued → cloning → parsing → chunking → embedding → graphing → metrics → ready | failed`)
-  surfaced to the UI.
-- **AI + embeddings are isolated** — all Anthropic and embedding calls go through
-  `core/ai`; prompts, retries, token budgeting live there.
-- **GitHub access isolated** — all git/GitHub calls go through one client in `core`.
-- **Retrieval is one module** — `core/retrieval` owns the hybrid retriever; the agent
-  and the search endpoint both call it. No retrieval logic leaks elsewhere.
-- **Secrets** via env only; `.env.example` stays current.
-- **Everything** is scoped by `repository_id`; ownership checked on every read.
-
----
+- Strict typing both sides (mypy / TS strict). REST under `/api/v1`; validate with
+  Pydantic at the boundary.
+- Anything touching a repo is a Celery task in `worker` — never inline in `api`.
+- Status is first-class: `queued → cloning → parsing → graphing → chunking → embedding →
+  metrics → ready | failed`, surfaced to the UI. (Same set of states as before; `graphing`
+  moved ahead of `chunking`/`embedding` to match the pipeline order above. The
+  `RepositoryStatus` enum in `core/models.py` already holds every value — only the order
+  the worker advances through them changes.)
+- Secrets via env only; keep `.env.example` current.
+- Everything scoped by `repository_id`; ownership checked on every read.
 
 ## Reference docs
 
 | File | Contents |
 |------|----------|
-| `docs/RETRIEVAL.md` | **Read first after this.** The hybrid retrieval design — the core engineering. |
-| `docs/ARCHITECTURE.md` | System components, data flow, service responsibilities |
-| `docs/WORKFLOW.md` | User journey + the background indexing pipeline, step by step |
+| `docs/RETRIEVAL.md` | **Read first.** Hybrid retrieval design — the core engineering |
+| `docs/ARCHITECTURE.md` | Components, data flow, service responsibilities |
+| `docs/WORKFLOW.md` | User journey + indexing pipeline, step by step |
 | `docs/DATA_MODEL.md` | Database schema and core entities |
-| `docs/FEATURES.md` | Per-feature spec for each V1 surface + V2 notes |
+| `docs/FEATURES.md` | Per-feature spec + V2 notes |
 | `docs/SETUP.md` | Local dev: services, env vars, first-run commands |
-| `docs/DEPLOYMENT.md` | Live deployment target on AWS (right-sized, phased) |
-| `docs/LEARNING_LOG.md` | Recruiter-ready log of concepts learned per milestone |
+| `docs/DEPLOYMENT.md` | AWS deployment target (phased) |
+| `docs/LEARNING_LOG.md` | Interview-ready log, one entry per milestone |
+| `docs/CONCEPTS.md` | Personal glossary of concepts new to me |
+| `docs/SESSION_LOG.md` | Session-to-session handoff (written by `/endsession`) |

@@ -1,0 +1,59 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: noetra
+      POSTGRES_PASSWORD: noetra
+      POSTGRES_DB: noetra
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U noetra"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  api:
+    build: ./backend
+    command: uv run uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    env_file: .env
+    environment:
+      PYTHONPATH: /backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/backend
+      - /backend/.venv
+      - repo_data:/data/repos
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build: ./backend
+    command: uv run celery -A core.celery_app worker --loglevel=info
+    env_file: .env
+    environment:
+      PYTHONPATH: /backend
+    volumes:
+      - ./backend:/backend
+      - /backend/.venv
+      - repo_data:/data/repos
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+volumes:
+  db_data:
+  repo_data:

@@ -6,10 +6,10 @@ host during dev — choose per component.
 ## Prerequisites
 
 - Docker + Docker Compose
-- Python 3.11+ with `uv` (or Poetry) — backend
+- Python 3.11+ with `uv`  — backend
 - Node 20+ with pnpm — frontend
 - A GitHub OAuth app (Client ID + Secret)
-- API keys: Anthropic (chat/summaries); embedding provider TBD
+- An OpenAI API key — used for both chat and embeddings
 
 ## Services (docker-compose)
 
@@ -39,12 +39,14 @@ CELERY_BROKER_URL=redis://redis:6379/0
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 GITHUB_OAUTH_CALLBACK=http://localhost:8000/api/v1/auth/callback
-# ai
-ANTHROPIC_API_KEY=
-EMBEDDING_PROVIDER=            # TBD — set when the model is chosen
-EMBEDDING_API_KEY=
+FRONTEND_URL=http://localhost:5173
+# ai — one provider, both uses; read only by core/ai
+OPENAI_API_KEY=
+OPENAI_CHAT_MODEL=
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small   # 1536 dims — must match chunk.embedding
 # app
 SESSION_SECRET=
+TOKEN_ENCRYPTION_KEY=          # Fernet key: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 CLONE_STORAGE_DIR=/data/repos  # where the worker clones repos
 ```
 
