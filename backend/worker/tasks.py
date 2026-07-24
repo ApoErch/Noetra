@@ -7,9 +7,20 @@ from pathlib import Path
 from core.celery_app import celery_app
 from core.config import get_settings
 from core.db import SessionLocal
-from core.models import File, Repository, RepositoryStatus, User
+from core.models import (
+    CodeEntity,
+    DependencyEdge,
+    EntityKind,
+    File,
+    Language,
+    Repository,
+    RepositoryStatus,
+    User,
+)
 from core.redis_client import release_index_lock
 from core.security import decrypt_token
+from indexer.graph import resolve_dependencies
+from indexer.parser import detect_language, extract
 
 CLONE_TIMEOUT_SECONDS = 300
 MAX_FILE_SIZE_BYTES = 1_000_000
@@ -100,6 +111,12 @@ def clone_repository(repository_id: str) -> None:
         # parsing stage (Milestone 4) that comes later. Content is stored in
         # Postgres, not read from disk at request time, so the API service never
         # needs filesystem access to this clone (see docs/WORKFLOW.md).
+        # Collected alongside the db.add() calls below so the parsing stage
+        # (after the commit) can walk these same objects directly instead of
+        # re-querying — their `id`s aren't populated until the commit's flush,
+        # but the Python objects themselves are already the right ones to use.
+        file_rows: list[File] = []
+
         ls_files = subprocess.run(["git", "ls-files"], cwd=dest, capture_output=True, text=True)
         for rel_path in ls_files.stdout.splitlines():
             file_path = dest / rel_path
@@ -112,15 +129,15 @@ def clone_repository(repository_id: str) -> None:
             # directory, raise IsADirectoryError. os.readlink reads the link
             # itself, matching what git considers that path's content to be.
             if file_path.is_symlink():
-                db.add(
-                    File(
-                        repository_id=repo.id,
-                        path=rel_path,
-                        content=None,
-                        is_binary=True,
-                        content_hash=hashlib.sha256(file_path.readlink().as_posix().encode()).hexdigest(),
-                    )
+                file_row = File(
+                    repository_id=repo.id,
+                    path=rel_path,
+                    content=None,
+                    is_binary=True,
+                    content_hash=hashlib.sha256(file_path.readlink().as_posix().encode()).hexdigest(),
                 )
+                db.add(file_row)
+                file_rows.append(file_row)
                 continue
 
             # Skip storing content for very large files — reading a huge file
@@ -128,15 +145,15 @@ def clone_repository(repository_id: str) -> None:
             # tree browser. Still record the file (with its hash) via chunked
             # reading so a giant file never has to sit in memory whole.
             if file_path.stat().st_size > MAX_FILE_SIZE_BYTES:
-                db.add(
-                    File(
-                        repository_id=repo.id,
-                        path=rel_path,
-                        content=None,
-                        is_binary=True,
-                        content_hash=_hash_file(file_path),
-                    )
+                file_row = File(
+                    repository_id=repo.id,
+                    path=rel_path,
+                    content=None,
+                    is_binary=True,
+                    content_hash=_hash_file(file_path),
                 )
+                db.add(file_row)
+                file_rows.append(file_row)
                 continue
 
             raw = file_path.read_bytes()
@@ -156,19 +173,84 @@ def clone_repository(repository_id: str) -> None:
                     text = None
                     is_binary = True
 
+            file_row = File(
+                repository_id=repo.id,
+                path=rel_path,
+                content=text,
+                is_binary=is_binary,
+                content_hash=hashlib.sha256(raw).hexdigest(),
+            )
+            db.add(file_row)
+            file_rows.append(file_row)
+        db.commit()
+
+        # parsing — Tree-sitter over every py/js/jsx/ts/tsx file, extracting the
+        # symbol table (functions/classes/methods) into `code_entities`. Each
+        # file's raw imports are kept in memory (not persisted) for the
+        # graphing stage right below — no reason to persist unresolved import
+        # strings when resolution happens in the very next step of this task.
+        repo.status = RepositoryStatus.PARSING
+        db.commit()
+
+        # (language, [module strings]) per parsed file path — graphing's input.
+        file_imports: dict[str, tuple[str, list[str]]] = {}
+
+        for file_row in file_rows:
+            if file_row.is_binary or file_row.content is None:
+                continue
+
+            language = detect_language(file_row.path)
+            if language is None:
+                continue
+
+            file_row.language = Language(language)
+            file_row.loc = len(file_row.content.splitlines())
+
+            extraction = extract(file_row.content, file_row.path)
+            if extraction is None:
+                continue
+
+            for entity in extraction.entities:
+                db.add(
+                    CodeEntity(
+                        repository_id=repo.id,
+                        file_id=file_row.id,
+                        kind=EntityKind(entity.kind),
+                        name=entity.name,
+                        signature=entity.signature,
+                        start_line=entity.start_line,
+                        end_line=entity.end_line,
+                    )
+                )
+
+            file_imports[file_row.path] = (language, [imp.module for imp in extraction.imports])
+        db.commit()
+
+        # graphing — pure in-memory resolution (indexer/graph.py) of each
+        # file's imports against every path this repo actually has, then
+        # persisted as `dependency_edges`. Bare/third-party specifiers (stdlib,
+        # npm packages) resolve to nothing and are silently dropped.
+        repo.status = RepositoryStatus.GRAPHING
+        db.commit()
+
+        known_paths = {file_row.path for file_row in file_rows}
+        path_to_file_id = {file_row.path: file_row.id for file_row in file_rows}
+
+        for edge in resolve_dependencies(file_imports, known_paths):
             db.add(
-                File(
+                DependencyEdge(
                     repository_id=repo.id,
-                    path=rel_path,
-                    content=text,
-                    is_binary=is_binary,
-                    content_hash=hashlib.sha256(raw).hexdigest(),
+                    from_file_id=path_to_file_id[edge.from_path],
+                    to_file_id=path_to_file_id[edge.to_path],
                 )
             )
         db.commit()
 
-        repo.status = RepositoryStatus.READY
-        db.commit()
+        # Chunking/embedding/metrics don't exist yet, so status stays at
+        # GRAPHING — the last stage actually completed — rather than jumping
+        # to READY. READY is reserved for "chat + full hybrid search + metrics
+        # all unlocked" (docs/WORKFLOW.md); claiming that now would be a lie
+        # (flagged as a known gap in a prior session's notes).
     except Exception as exc:
         db.rollback()
         if repo is not None:
