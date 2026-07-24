@@ -16,6 +16,10 @@ dependencies = [
     "httpx>=0.28.1",
     "cryptography>=49.0.0",
     "itsdangerous>=2.2.0",
+    "tree-sitter>=0.23",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-typescript>=0.23",
 ]
 
 [dependency-groups]
