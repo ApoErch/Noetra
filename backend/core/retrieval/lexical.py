@@ -144,34 +144,45 @@ def _ranked_chunks(
         .limit(limit)
     )
 
-    return [
-        RetrievalHit(
-            file_id=row.file_id,
-            path=row.path,
-            start_line=row.start_line,  # exact — the chunk's own boundaries, nothing inferred
-            end_line=row.end_line,
-            snippet=_snippet(row.content, lexemes),
-            score=float(row.rank),
-            sources=[RetrieverSource.LEXICAL],
+    hits: list[RetrievalHit] = []
+    for row in db.execute(stmt).all():
+        match_line, snippet = _snippet(row.content, lexemes, row.start_line)
+        hits.append(
+            RetrievalHit(
+                file_id=row.file_id,
+                path=row.path,
+                start_line=row.start_line,  # exact — the chunk's own boundaries, nothing inferred
+                end_line=row.end_line,
+                snippet=snippet,
+                score=float(row.rank),
+                sources=[RetrieverSource.LEXICAL],
+                match_line=match_line,
+            )
         )
-        for row in db.execute(stmt).all()
-    ]
+    return hits
 
 
-def _snippet(content: str, lexemes: list[str]) -> str:
-    """Pick the line inside a chunk that best matches the query, for the results list.
+def _snippet(content: str, lexemes: list[str], start_line: int) -> tuple[int, str]:
+    """Pick the best-matching line inside a chunk: its absolute file line number and its text.
 
-    Display only — the citation comes from the chunk's line range, so this can't put a hit
-    in the wrong place the way file-level line-guessing could.
+    The chunk's range already says *which region* answers the query; this says which single
+    line inside it actually matched, so the UI can highlight the whole block and still point
+    at the reason. Unlike the old file-level version, a bad guess here can't misplace the
+    citation — the range comes from the chunk regardless.
     """
     lines = content.splitlines()
     if not lines:
-        return ""
-    if lexemes:
-        best = max(lines, key=lambda line: _line_score(line, lexemes))
-        if best.strip():
-            return best.strip()
-    return lines[0].strip()
+        return start_line, ""
+
+    scores = [_line_score(line, lexemes) for line in lines] if lexemes else [0] * len(lines)
+    # Highest-scoring non-blank line; ties go to the earliest. Blank lines are skipped so a
+    # chunk never gets cited at an empty line just because nothing matched.
+    best = max(
+        (i for i, line in enumerate(lines) if line.strip()),
+        key=lambda i: scores[i],
+        default=0,
+    )
+    return start_line + best, lines[best].strip()
 
 
 def _line_score(line: str, lexemes: list[str]) -> int:

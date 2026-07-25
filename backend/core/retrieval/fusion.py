@@ -39,6 +39,11 @@ def reciprocal_rank_fusion(
             if existing.entity_name is None and hit.entity_name is not None:
                 existing.entity_name = hit.entity_name
                 existing.entity_kind = hit.entity_kind
+            # Structural hits carry no match_line (they match on a name, not on body text),
+            # so keep whichever retriever did work one out.
+            if existing.match_line is None and hit.match_line is not None:
+                existing.match_line = hit.match_line
+                existing.snippet = hit.snippet
 
     for key, hit in merged.items():
         hit.score = scores[key]  # overwrite native score with the fused score
