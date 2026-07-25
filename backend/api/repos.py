@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -9,6 +9,7 @@ from core.db import get_db
 from core.github import parse_repo_slug
 from core.models import File, Repository, RepositoryStatus, User
 from core.redis_client import acquire_index_lock
+from core.retrieval import RetrievalHit, search
 
 router = APIRouter(prefix="/api/v1/repos", tags=["repos"])
 
@@ -164,3 +165,15 @@ def get_file(
     if file is None:
         raise HTTPException(status_code=404, detail="File not found")
     return {"id": str(file.id), "path": file.path, "content": file.content, "is_binary": file.is_binary}
+
+
+@router.get("/{repository_id}/search")
+def search_repository(
+    repository_id: str,
+    q: str = Query(..., min_length=1),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[RetrievalHit]:
+    """Hybrid lexical + structural search over an indexed repo, returning RRF-ranked file:line hits."""
+    repo = _get_owned_repository(repository_id, user, db)
+    return search(db, repo.id, q, limit=20)
