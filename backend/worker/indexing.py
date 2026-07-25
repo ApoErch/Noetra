@@ -7,6 +7,7 @@ from celery.utils.log import get_task_logger
 from sqlalchemy.orm import Session
 
 from core.models import (
+    Chunk,
     CodeEntity,
     DependencyEdge,
     EntityKind,
@@ -15,8 +16,9 @@ from core.models import (
     Repository,
     RepositoryStatus,
 )
+from indexer.chunker import chunk_file
 from indexer.graph import resolve_dependencies
-from indexer.parser import detect_language, extract
+from indexer.parser import ExtractedEntity, detect_language, extract
 
 MAX_FILE_SIZE_BYTES = 1_000_000
 
@@ -33,11 +35,11 @@ def _hash_file(path: Path, chunk_size: int = 1 << 20) -> str:
 
 
 def index_repository_files(db: Session, repo: Repository, repo_dir: Path) -> None:
-    """Walk a cloned repo's tracked files, extract symbols, resolve the import graph, and persist all three.
+    """Walk a cloned repo's tracked files, extract symbols, resolve the import graph, chunk, and persist.
 
     The shared indexing core called by BOTH the production clone task and the eval seed, so both
-    produce identical File/CodeEntity/DependencyEdge rows. Assumes `repo_dir` is already a cloned
-    git checkout and `repo.status` is CLONING; advances status through PARSING and GRAPHING.
+    produce identical File/CodeEntity/DependencyEdge/Chunk rows. Assumes `repo_dir` is already a
+    cloned git checkout and `repo.status` is CLONING; advances it through PARSING, GRAPHING, CHUNKING.
     """
     stage_start = time.perf_counter()
 
@@ -132,6 +134,10 @@ def index_repository_files(db: Session, repo: Repository, repo_dir: Path) -> Non
 
     # (language, [module strings]) per parsed file path — graphing's input.
     file_imports: dict[str, tuple[str, list[str]]] = {}
+    # (extracted entities, their persisted rows) per parsed file path — chunking's input.
+    # It needs both: the entities to align chunk boundaries to real syntax, and the rows to
+    # link each chunk back to its symbol. Kept parallel, so index i matches in both lists.
+    file_entities: dict[str, tuple[list[ExtractedEntity], list[CodeEntity]]] = {}
 
     for file_row in file_rows:
         if file_row.is_binary or file_row.content is None:
@@ -148,19 +154,22 @@ def index_repository_files(db: Session, repo: Repository, repo_dir: Path) -> Non
         if extraction is None:
             continue
 
-        for entity in extraction.entities:
-            db.add(
-                CodeEntity(
-                    repository_id=repo.id,
-                    file_id=file_row.id,
-                    kind=EntityKind(entity.kind),
-                    name=entity.name,
-                    signature=entity.signature,
-                    start_line=entity.start_line,
-                    end_line=entity.end_line,
-                )
+        entity_rows = [
+            CodeEntity(
+                repository_id=repo.id,
+                file_id=file_row.id,
+                kind=EntityKind(entity.kind),
+                name=entity.name,
+                signature=entity.signature,
+                start_line=entity.start_line,
+                end_line=entity.end_line,
             )
+            for entity in extraction.entities
+        ]
+        for entity_row in entity_rows:
+            db.add(entity_row)
 
+        file_entities[file_row.path] = (extraction.entities, entity_rows)
         file_imports[file_row.path] = (language, [imp.module for imp in extraction.imports])
     db.commit()
 
@@ -188,3 +197,36 @@ def index_repository_files(db: Session, repo: Repository, repo_dir: Path) -> Non
     db.commit()
 
     logger.info("repo %s: graph stage took %.2fs", repo.id, time.perf_counter() - stage_start)
+    stage_start = time.perf_counter()
+
+    # chunking — split every text file into AST-aligned retrieval units
+    # (indexer/chunker.py). This runs over *all* text files, not just parsed
+    # py/js/ts ones: a file with no entities (markdown, JSON, config) still
+    # chunks into gap chunks, so nothing in the repo becomes unsearchable.
+    # Chunks are what retrieval returns, and each one carries a real line
+    # range — which is what makes a citation exact instead of guessed.
+    repo.status = RepositoryStatus.CHUNKING
+    db.commit()
+
+    for file_row in file_rows:
+        if file_row.is_binary or file_row.content is None:
+            continue
+
+        entities, entity_rows = file_entities.get(file_row.path, ([], []))
+        for chunk in chunk_file(file_row.content, file_row.path, entities):
+            db.add(
+                Chunk(
+                    repository_id=repo.id,
+                    file_id=file_row.id,
+                    entity_id=(
+                        entity_rows[chunk.entity_index].id if chunk.entity_index is not None else None
+                    ),
+                    start_line=chunk.start_line,
+                    end_line=chunk.end_line,
+                    content=chunk.content,
+                    embed_text=chunk.embed_text,
+                )
+            )
+    db.commit()
+
+    logger.info("repo %s: chunk stage took %.2fs", repo.id, time.perf_counter() - stage_start)

@@ -98,13 +98,12 @@ def clone_repository(repository_id: str) -> None:
 
         logger.info("repo %s: clone stage took %.2fs", repository_id, time.perf_counter() - clone_start)
 
-        # Everything from here — file walk, parsing, graphing, and the
-        # PARSING/GRAPHING status transitions — is the shared indexing core,
-        # so the eval seed indexes repos through the exact same code path.
-        # Chunking/embedding/metrics don't exist yet, so status stays at
-        # GRAPHING (the last stage actually completed) rather than jumping to
-        # READY, which is reserved for "chat + full hybrid search + metrics all
-        # unlocked" (docs/WORKFLOW.md).
+        # Everything from here — file walk, parsing, graphing, chunking, and the
+        # matching status transitions — is the shared indexing core, so the eval
+        # seed indexes repos through the exact same code path. Embedding/metrics
+        # don't exist yet, so status stays at CHUNKING (the last stage actually
+        # completed) rather than jumping to READY, which is reserved for "chat +
+        # full hybrid search + metrics all unlocked" (docs/WORKFLOW.md).
         index_repository_files(db, repo, dest)
 
         logger.info("repo %s: full pipeline took %.2fs", repository_id, time.perf_counter() - task_start)
