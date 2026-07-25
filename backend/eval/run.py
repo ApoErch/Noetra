@@ -30,6 +30,11 @@ class QuestionKind(str, enum.Enum):
     SYMBOL = "symbol"  # names an identifier that exists verbatim; structural should nail it
     KEYWORD = "keyword"  # words that literally appear in the source; lexical's job
     CONCEPTUAL = "conceptual"  # the user's words appear nowhere in the code; only embeddings can help
+    # A guard-rail bucket, not a retrieval target: the answer genuinely lives in prose
+    # (README, docs page), so these fail if the non-source rank penalty in
+    # core/retrieval/lexical.py is tuned so hard that documentation stops surfacing at all.
+    # Kept as its own kind so the three buckets above keep comparable denominators.
+    DOCS = "docs"
 
 
 @dataclass(frozen=True)

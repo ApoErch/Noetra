@@ -288,3 +288,35 @@
   answers:
     - { path: "packages/zod/src/v4/core/util.ts", lines: [493, 497] }
     - { path: "packages/zod/src/v4/core/util.ts", lines: [406, 412] }
+
+# ------------------------------------------------------------------ docs guard-rail
+# These four are NOT retrieval targets — they exist to catch over-correction. The lexical
+# retriever demotes non-source files (`_NON_SOURCE_RANK_FACTOR`) because English prose
+# otherwise outranks code on every natural-language query. That penalty is measured against
+# an answer set that is 100% source files, so it can only ever look good. These questions
+# have their answers genuinely in prose: if the penalty is cranked too hard, they break and
+# the scoreboard says so instead of silently rewarding the bias.
+
+- q: "What is the plan for scaling the system once load grows?"
+  repo: noetra
+  kind: docs
+  answers:
+    - { path: "docs/DEPLOYMENT.md", lines: [31, 45] }
+
+- q: "How do I upload a file with a POST request?"
+  repo: requests
+  kind: docs
+  answers:
+    - { path: "docs/user/quickstart.rst", lines: [305, 341] }
+
+- q: "Which environment variables configure a proxy?"
+  repo: requests
+  kind: docs
+  answers:
+    - { path: "docs/user/advanced.rst", lines: [616, 625] }
+
+- q: "How do I attach metadata to a schema?"
+  repo: zod
+  kind: docs
+  answers:
+    - { path: "packages/docs/content/metadata.mdx", lines: [13, 35] }
