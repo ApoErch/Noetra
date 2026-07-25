@@ -1,0 +1,322 @@
+# Retrieval eval set — the scoreboard every retrieval change is judged against.
+#
+# Each question records the location(s) that actually contain the answer, read out of the
+# repo AT ITS PINNED SHA (eval/repos.py) so these line numbers never drift. A question
+# counts as recalled if any hit in the top-k overlaps any one of its answer ranges.
+#
+# `kind` is the whole point of the breakdown — each kind is a different retriever's job,
+# so the by-kind scoreboard says *which* retriever is weak, not just that recall is low:
+#   symbol      — a short identifier-shaped query, the way a code search box gets typed
+#                 into. Structural (pg_trgm over code_entities) should own these.
+#   keyword     — words that literally appear in the source. Lexical (tsvector) owns these.
+#   conceptual  — the user's words appear NOWHERE in the file. Neither cheap retriever can
+#                 do anything but get lucky. This bucket is the entire case for or against
+#                 M7 embeddings: if conceptual recall is already fine, M7 never gets built.
+#
+# Answer ranges are deliberately the enclosing definition (not one line), because a lexical
+# hit lands on one line and a structural hit spans the whole symbol — overlap accepts both.
+
+# ---------------------------------------------------------------- noetra (own codebase)
+
+- q: "decrypt_token"
+  repo: noetra
+  kind: symbol
+  answers:
+    - { path: "backend/core/security.py", lines: [22, 24] }
+
+- q: "acquire_index_lock"
+  repo: noetra
+  kind: symbol
+  answers:
+    - { path: "backend/core/redis_client.py", lines: [10, 12] }
+
+- q: "reciprocal_rank_fusion"
+  repo: noetra
+  kind: symbol
+  answers:
+    - { path: "backend/core/retrieval/fusion.py", lines: [15, 45] }
+
+- q: "build_suffix_index"
+  repo: noetra
+  kind: symbol
+  answers:
+    - { path: "backend/indexer/graph.py", lines: [26, 41] }
+
+- q: "_get_owned_repository"
+  repo: noetra
+  kind: symbol
+  answers:
+    - { path: "backend/api/repos.py", lines: [90, 99] }
+
+- q: "git clone basic auth header"
+  repo: noetra
+  kind: keyword
+  answers:
+    - { path: "backend/worker/tasks.py", lines: [47, 66] }
+
+- q: "websearch_to_tsquery ts_rank"
+  repo: noetra
+  kind: keyword
+  answers:
+    - { path: "backend/core/retrieval/lexical.py", lines: [16, 47] }
+
+- q: "trigram similarity operator fuzzy symbol match"
+  repo: noetra
+  kind: keyword
+  answers:
+    - { path: "backend/core/retrieval/structural.py", lines: [10, 45] }
+
+- q: "oauth state CSRF session"
+  repo: noetra
+  kind: keyword
+  answers:
+    - { path: "backend/api/auth.py", lines: [16, 29] }
+
+- q: "NUL byte binary file detection"
+  repo: noetra
+  kind: keyword
+  answers:
+    - { path: "backend/worker/indexing.py", lines: [94, 110] }
+
+# The words below appear nowhere in the target files — "at once", "protected",
+# "strategies disagree", "too big", "went wrong" are all the user's vocabulary, not
+# the code's. This is the bucket M7 has to beat.
+- q: "How does the app stop two indexing jobs running for the same repository at once?"
+  repo: noetra
+  kind: conceptual
+  answers:
+    - { path: "backend/core/redis_client.py", lines: [10, 17] }
+    - { path: "backend/api/repos.py", lines: [77, 78] }
+    - { path: "backend/api/repos.py", lines: [113, 114] }
+
+- q: "Where are user credentials protected before being written to the database?"
+  repo: noetra
+  kind: conceptual
+  answers:
+    - { path: "backend/core/security.py", lines: [17, 19] }
+    - { path: "backend/api/auth.py", lines: [34, 47] }
+
+- q: "How does the app decide the final order of results when several strategies disagree?"
+  repo: noetra
+  kind: conceptual
+  answers:
+    - { path: "backend/core/retrieval/fusion.py", lines: [15, 45] }
+
+- q: "What happens when a repository contains a file too big to store?"
+  repo: noetra
+  kind: conceptual
+  answers:
+    - { path: "backend/worker/indexing.py", lines: [78, 92] }
+
+- q: "How can a user recover from an import that went wrong?"
+  repo: noetra
+  kind: conceptual
+  answers:
+    - { path: "backend/api/repos.py", lines: [102, 123] }
+
+# ---------------------------------------------------------------- requests (psf/requests)
+
+- q: "should_strip_auth"
+  repo: requests
+  kind: symbol
+  answers:
+    - { path: "src/requests/sessions.py", lines: [154, 184] }
+
+- q: "CaseInsensitiveDict"
+  repo: requests
+  kind: symbol
+  answers:
+    - { path: "src/requests/structures.py", lines: [20, 94] }
+
+- q: "extract_cookies_to_jar"
+  repo: requests
+  kind: symbol
+  answers:
+    - { path: "src/requests/cookies.py", lines: [135, 152] }
+
+- q: "build_digest_header"
+  repo: requests
+  kind: symbol
+  answers:
+    - { path: "src/requests/auth.py", lines: [157, 267] }
+
+- q: "super_len"
+  repo: requests
+  kind: symbol
+  answers:
+    - { path: "src/requests/utils.py", lines: [160, 230] }
+
+- q: "netrc auth for a url"
+  repo: requests
+  kind: keyword
+  answers:
+    - { path: "src/requests/utils.py", lines: [231, 282] }
+
+- q: "raise HTTPError for a client error status code"
+  repo: requests
+  kind: keyword
+  answers:
+    - { path: "src/requests/models.py", lines: [1144, 1171] }
+
+- q: "no_proxy environment variable bypass proxies"
+  repo: requests
+  kind: keyword
+  answers:
+    - { path: "src/requests/utils.py", lines: [810, 872] }
+
+- q: "Transfer-Encoding chunked request body"
+  repo: requests
+  kind: keyword
+  answers:
+    - { path: "src/requests/models.py", lines: [576, 653] }
+
+- q: "charset_normalizer chardet apparent encoding"
+  repo: requests
+  kind: keyword
+  answers:
+    - { path: "src/requests/models.py", lines: [897, 906] }
+    - { path: "src/requests/models.py", lines: [1054, 1089] }
+
+- q: "How does it avoid handing your password to a different host after a redirect?"
+  repo: requests
+  kind: conceptual
+  answers:
+    - { path: "src/requests/sessions.py", lines: [154, 184] }
+    - { path: "src/requests/sessions.py", lines: [309, 333] }
+
+- q: "When a redirect happens, what decides whether the HTTP verb changes?"
+  repo: requests
+  kind: conceptual
+  answers:
+    - { path: "src/requests/sessions.py", lines: [370, 393] }
+
+- q: "Why do header lookups work no matter how you capitalize them?"
+  repo: requests
+  kind: conceptual
+  answers:
+    - { path: "src/requests/structures.py", lines: [20, 94] }
+
+- q: "How are network connections kept alive and shared between calls?"
+  repo: requests
+  kind: conceptual
+  answers:
+    - { path: "src/requests/adapters.py", lines: [239, 268] }
+    - { path: "src/requests/adapters.py", lines: [201, 222] }
+
+- q: "What decides whether a server's TLS identity is trusted?"
+  repo: requests
+  kind: conceptual
+  answers:
+    - { path: "src/requests/adapters.py", lines: [307, 364] }
+
+# ---------------------------------------------------------------- zod (colinhacks/zod)
+# Note: zod builds most of its schema types via `core.$constructor(...)` factory calls
+# bound to a const, which the Tree-sitter extractor does NOT record as entities (only
+# arrow/function values are). Symbol questions here deliberately target real
+# `export function` / `export class` declarations so the symbol table is actually tested.
+
+- q: "floatSafeRemainder"
+  repo: zod
+  kind: symbol
+  answers:
+    - { path: "packages/zod/src/v4/core/util.ts", lines: [248, 255] }
+
+- q: "toDotPath"
+  repo: zod
+  kind: symbol
+  answers:
+    - { path: "packages/zod/src/v4/core/errors.ts", lines: [426, 440] }
+
+- q: "promiseAllObject"
+  repo: zod
+  kind: symbol
+  answers:
+    - { path: "packages/zod/src/v4/core/util.ts", lines: [321, 332] }
+
+- q: "$ZodRegistry"
+  repo: zod
+  kind: symbol
+  answers:
+    - { path: "packages/zod/src/v4/core/registries.ts", lines: [27, 77] }
+
+- q: "not_multiple_of divisor issue"
+  repo: zod
+  kind: keyword
+  answers:
+    - { path: "packages/zod/src/v4/core/checks.ts", lines: [168, 194] }
+
+- q: "prettifyError issue path lines"
+  repo: zod
+  kind: keyword
+  answers:
+    - { path: "packages/zod/src/v4/core/errors.ts", lines: [442, 455] }
+
+- q: "globalRegistry globalThis dual package hazard"
+  repo: zod
+  kind: keyword
+  answers:
+    - { path: "packages/zod/src/v4/core/registries.ts", lines: [94, 105] }
+
+- q: "bigint JSON stringify replacer"
+  repo: zod
+  kind: keyword
+  answers:
+    - { path: "packages/zod/src/v4/core/util.ts", lines: [219, 222] }
+
+- q: "How does it avoid precision problems when validating divisibility?"
+  repo: zod
+  kind: conceptual
+  answers:
+    - { path: "packages/zod/src/v4/core/util.ts", lines: [248, 255] }
+    - { path: "packages/zod/src/v4/core/checks.ts", lines: [168, 194] }
+
+- q: "Where does a validation failure become a human-readable summary?"
+  repo: zod
+  kind: conceptual
+  answers:
+    - { path: "packages/zod/src/v4/core/errors.ts", lines: [426, 455] }
+
+- q: "How can extra descriptive information be attached to a schema without altering it?"
+  repo: zod
+  kind: conceptual
+  answers:
+    - { path: "packages/zod/src/v4/core/registries.ts", lines: [27, 105] }
+
+- q: "How is a schema's shape copied so the original stays untouched?"
+  repo: zod
+  kind: conceptual
+  answers:
+    - { path: "packages/zod/src/v4/core/util.ts", lines: [493, 497] }
+    - { path: "packages/zod/src/v4/core/util.ts", lines: [406, 412] }
+
+# ------------------------------------------------------------------ docs guard-rail
+# These four are NOT retrieval targets — they exist to catch over-correction. The lexical
+# retriever demotes non-source files (`_NON_SOURCE_RANK_FACTOR`) because English prose
+# otherwise outranks code on every natural-language query. That penalty is measured against
+# an answer set that is 100% source files, so it can only ever look good. These questions
+# have their answers genuinely in prose: if the penalty is cranked too hard, they break and
+# the scoreboard says so instead of silently rewarding the bias.
+
+- q: "What is the plan for scaling the system once load grows?"
+  repo: noetra
+  kind: docs
+  answers:
+    - { path: "docs/DEPLOYMENT.md", lines: [31, 45] }
+
+- q: "How do I upload a file with a POST request?"
+  repo: requests
+  kind: docs
+  answers:
+    - { path: "docs/user/quickstart.rst", lines: [305, 341] }
+
+- q: "Which environment variables configure a proxy?"
+  repo: requests
+  kind: docs
+  answers:
+    - { path: "docs/user/advanced.rst", lines: [616, 625] }
+
+- q: "How do I attach metadata to a schema?"
+  repo: zod
+  kind: docs
+  answers:
+    - { path: "packages/docs/content/metadata.mdx", lines: [13, 35] }

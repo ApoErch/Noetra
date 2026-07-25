@@ -141,6 +141,47 @@ class CodeEntity(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Chunk(Base):
+    """One AST-aligned slice of a file — the unit hybrid retrieval actually returns (see docs/DATA_MODEL.md).
+
+    Chunks are what make a citation exact: a file-level hit has to guess which line to point
+    at, whereas a chunk already knows the line range it covers. `indexer.chunker.chunk_file`
+    produces one per leaf entity plus gap chunks for everything between them.
+
+    The `embedding vector(1536)` column from DATA_MODEL.md is deliberately absent — that
+    arrives with pgvector in M7, and only if the eval shows semantic retrieval earning its
+    slot. `embed_text` already holds exactly what would be embedded.
+    """
+
+    __tablename__ = "chunks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), index=True
+    )
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("files.id", ondelete="CASCADE"), index=True
+    )
+    # Null for a gap chunk — imports, module constants, a class header, or any file with no
+    # entities at all (markdown, JSON). Those are still worth retrieving, just not symbols.
+    entity_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("code_entities.id", ondelete="SET NULL"), nullable=True
+    )
+    start_line: Mapped[int] = mapped_column(Integer)
+    end_line: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    embed_text: Mapped[str] = mapped_column(Text)
+    # Indexed over `embed_text`, not `content`, so the file path and enclosing class name
+    # are searchable alongside the body — contextual retrieval applied to the lexical leg
+    # (docs/RETRIEVAL.md, "chunking rule"). Generated, so Postgres maintains it itself.
+    content_tsv: Mapped[str | None] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', coalesce(embed_text, ''))", persisted=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class DependencyKind(str, enum.Enum):
     """The relationship a `dependency_edge` represents. Only "import" exists in V1."""
 
