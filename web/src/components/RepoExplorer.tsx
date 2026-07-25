@@ -3,32 +3,39 @@ import { useQuery } from '@tanstack/react-query'
 import { apiFetch } from '../lib/api'
 import { buildFileTree, type FileEntry, type TreeNode } from '../lib/tree'
 import { FileTree } from './FileTree'
-import { FileViewer, type FileContent } from './FileViewer'
+import { FileOverlay } from './FileOverlay'
+import { SearchPanel } from './SearchPanel'
+import type { SearchHit, ViewerTarget } from '../lib/search'
 import type { Repo } from './RepoList'
 
 type SelectedFile = Extract<TreeNode, { type: 'file' }>
 
-/** Repo file tree browser: fetches the flat path list once, folds it into a tree, lazy-loads content on click. */
+/** Repo workspace: search on the left-to-right main area, file tree in the sidebar, files opened as an overlay. */
 export function RepoExplorer({ repo, onBack }: { repo: Repo; onBack: () => void }) {
-  const [selected, setSelected] = useState<SelectedFile | null>(null)
+  // A single target drives the overlay, whether the file was opened from the tree (no
+  // highlight) or by following a citation (highlighted range). One piece of state means the
+  // two paths can never disagree about what's on screen.
+  const [target, setTarget] = useState<ViewerTarget | null>(null)
 
   const { data: files, isLoading } = useQuery<FileEntry[]>({
     queryKey: ['files', repo.id],
     queryFn: () => apiFetch<FileEntry[]>(`/api/v1/repos/${repo.id}/files`),
   })
 
-  const { data: fileContent } = useQuery<FileContent>({
-    queryKey: ['file', repo.id, selected?.id],
-    queryFn: () => apiFetch<FileContent>(`/api/v1/repos/${repo.id}/files/${selected!.id}`),
-    enabled: !!selected && !selected.is_binary,
-  })
-
   const tree = files ? buildFileTree(files) : []
-  const viewerFile: FileContent | null = !selected
-    ? null
-    : selected.is_binary
-      ? { id: selected.id, path: selected.path, content: null, is_binary: true }
-      : (fileContent ?? null)
+
+  const openFromTree = (node: SelectedFile) =>
+    setTarget({ fileId: node.id, path: node.path, isBinary: node.is_binary, highlight: null })
+
+  const openFromHit = (hit: SearchHit) =>
+    setTarget({
+      fileId: hit.file_id,
+      path: hit.path,
+      // A search hit doesn't carry is_binary — but only text files are chunked and indexed,
+      // so anything retrievable is previewable. Look it up anyway to stay honest if that changes.
+      isBinary: files?.find((file) => file.id === hit.file_id)?.is_binary ?? false,
+      highlight: { startLine: hit.start_line, endLine: hit.end_line, matchLine: hit.match_line },
+    })
 
   return (
     <div className="flex h-screen w-screen flex-col bg-zinc-950">
@@ -44,18 +51,21 @@ export function RepoExplorer({ repo, onBack }: { repo: Repo; onBack: () => void 
         </button>
         <span className="font-medium text-white">{repo.name}</span>
       </div>
+
       <div className="flex flex-1 overflow-hidden">
         <div className="w-64 shrink-0 overflow-y-auto border-r border-zinc-800 bg-zinc-950">
           {isLoading ? (
             <p className="px-4 py-3 text-sm text-zinc-500">Loading files…</p>
           ) : (
-            <FileTree nodes={tree} selectedFileId={selected?.id ?? null} onSelectFile={setSelected} />
+            <FileTree nodes={tree} selectedFileId={target?.fileId ?? null} onSelectFile={openFromTree} />
           )}
         </div>
-        <div className="flex-1">
-          <FileViewer file={viewerFile} />
+        <div className="flex-1 overflow-hidden">
+          <SearchPanel repoId={repo.id} onOpenHit={openFromHit} />
         </div>
       </div>
+
+      {target && <FileOverlay repoId={repo.id} target={target} onClose={() => setTarget(null)} />}
     </div>
   )
 }

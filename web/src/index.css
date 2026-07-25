@@ -4,3 +4,17 @@ html {
   color-scheme: dark;
   background-color: #09090b;
 }
+
+/* Monaco line decorations for a citation. Plain CSS rather than Tailwind utilities,
+   because Monaco applies these classes to line elements it renders itself — Tailwind's
+   source scanner never sees those, so a utility class name would be stripped from the
+   build. `.noetra-cited-range` shades the whole block a citation points at;
+   `.noetra-match-line` marks the one line inside it that actually matched the query. */
+.noetra-cited-range {
+  background-color: rgb(99 102 241 / 0.12);
+}
+
+.noetra-match-line {
+  background-color: rgb(99 102 241 / 0.28);
+  box-shadow: inset 2px 0 0 rgb(129 140 248);
+}
