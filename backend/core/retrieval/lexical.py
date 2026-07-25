@@ -8,9 +8,14 @@ from core.models import File
 from core.retrieval.types import RetrievalHit, RetrieverSource
 
 _WORD_RE = re.compile(r"\w+")
-# websearch_to_tsquery keywords that are query operators, not real search terms — we
-# strip them before locating the matching line so "auth OR login" doesn't hunt for "or".
+# websearch_to_tsquery keywords that are query operators, not real search terms — they'd
+# be re-read as operators if we echoed them back into a relaxed query.
 _OPERATOR_WORDS = {"or", "and"}
+
+# How many lines either side of a candidate count toward its score. A query term sitting
+# alone on an import line at the top of a file shouldn't outrank the block of code the
+# query is actually about, so every line is scored together with its neighbours.
+_CONTEXT_WINDOW_LINES = 2
 
 
 def lexical_search(
@@ -26,7 +31,8 @@ def lexical_search(
     hence the second pass. Strict matches keep their positions, so precision is unchanged
     and only otherwise-empty slots get filled.
     """
-    hits = _ranked_files(db, repository_id, search_text=query, snippet_query=query, limit=limit)
+    lexemes = _query_lexemes(db, query)
+    hits = _ranked_files(db, repository_id, search_text=query, lexemes=lexemes, limit=limit)
     if len(hits) >= limit:
         return hits
 
@@ -36,7 +42,7 @@ def lexical_search(
 
     seen = {hit.file_id for hit in hits}
     for hit in _ranked_files(
-        db, repository_id, search_text=relaxed, snippet_query=query, limit=limit
+        db, repository_id, search_text=relaxed, lexemes=lexemes, limit=limit
     ):
         if hit.file_id in seen:
             continue
@@ -58,18 +64,29 @@ def _relaxed_query(query: str) -> str | None:
     return " OR ".join(terms)
 
 
+def _query_lexemes(db: Session, query: str) -> list[str]:
+    """Ask Postgres for the query's own stemmed lexemes, so citations use the index's vocabulary.
+
+    to_tsvector applies exactly the stemming and stopword removal that built `content_tsv`
+    ("credentials" -> 'credenti', "the" dropped). Re-deriving stems in Python would drift
+    from what actually matched, which is the whole bug this avoids.
+    """
+    stmt = select(func.tsvector_to_array(func.to_tsvector("english", query)))
+    return list(db.scalar(stmt) or [])
+
+
 def _ranked_files(
     db: Session,
     repository_id: uuid.UUID,
     *,
     search_text: str,
-    snippet_query: str,
+    lexemes: list[str],
     limit: int,
 ) -> list[RetrievalHit]:
     """Run one tsquery over a repo's files and return each match as a hit cited at its best line.
 
-    `snippet_query` stays the user's original text even when `search_text` is the relaxed
-    rewrite — the citation should point at what they actually asked for, not at the operators.
+    `lexemes` always comes from the user's original query, even when `search_text` is the
+    relaxed rewrite — the citation should point at what they asked for, not at the operators.
     """
     # websearch_to_tsquery parses Google-style input ("auth OR \"session cookie\"") and
     # never raises on junk — the safe choice for raw user text. `@@` is the match operator;
@@ -86,7 +103,7 @@ def _ranked_files(
 
     hits: list[RetrievalHit] = []
     for row in db.execute(stmt).all():
-        line, snippet = _best_line(row.content, snippet_query)
+        line, snippet = _best_line(row.content, lexemes)
         hits.append(
             RetrievalHit(
                 file_id=row.id,
@@ -101,25 +118,42 @@ def _ranked_files(
     return hits
 
 
-def _best_line(content: str | None, query: str) -> tuple[int, str]:
-    """Find the file line containing the most query terms, for a line-level citation.
+def _best_line(content: str | None, lexemes: list[str]) -> tuple[int, str]:
+    """Find the line at the centre of the densest cluster of query matches, for a line citation.
 
-    Full-text search matches a whole file; a citation needs a line. We scan for the query
-    words and return the first line that contains the most of them (1-indexed) plus its text.
+    Full-text search matches a whole file; a citation needs a line. Source words are matched
+    against Postgres' own stemmed lexemes by prefix ('credenti' matches "credentials"), since
+    a stem is a prefix of the words it came from — that keeps the citation consistent with
+    what the index matched. Neighbouring lines count toward each line's score so a lone term
+    in an import loses to the block of code the query is really about.
     """
     if not content:
         return 1, ""
-    terms = {t.lower() for t in _WORD_RE.findall(query)} - _OPERATOR_WORDS
-    if not terms:
-        return 1, content.splitlines()[0].strip() if content.strip() else ""
-
     lines = content.splitlines()
-    best_idx, best_score = 0, -1
-    for i, line in enumerate(lines):
-        low = line.lower()
-        score = sum(1 for term in terms if term in low)
+    if not lines:
+        return 1, ""
+    if not lexemes:
+        return 1, lines[0].strip()
+
+    scores = [_line_score(line, lexemes) for line in lines]
+
+    best_idx, best_score = -1, 0
+    for i, own in enumerate(scores):
+        if own == 0:
+            continue  # cite a line that actually matches, never one merely near a match
+        window = scores[max(0, i - _CONTEXT_WINDOW_LINES) : i + _CONTEXT_WINDOW_LINES + 1]
+        score = own * 2 + sum(window)  # the line's own terms outweigh its neighbours'
         if score > best_score:
             best_idx, best_score = i, score
-            if score == len(terms):  # every term on one line — can't beat this
-                break
+
+    if best_idx < 0:
+        # The file matched on a word form the prefix rule didn't catch (an irregular stem
+        # like 'written' -> "write"). Nothing better to point at than the top of the file.
+        return 1, lines[0].strip()
     return best_idx + 1, lines[best_idx].strip()
+
+
+def _line_score(line: str, lexemes: list[str]) -> int:
+    """Count how many distinct query lexemes appear in one line, matched on stem prefix."""
+    words = [word.lower() for word in _WORD_RE.findall(line)]
+    return sum(1 for lexeme in lexemes if any(word.startswith(lexeme) for word in words))
