@@ -1063,3 +1063,220 @@ Docker image by digest (`@sha256:…`) instead of `:latest`. The pattern is alwa
 name that can move with a fingerprint that can't, for reproducibility.*
 
 **Docs:** [Git — commit objects & SHAs](https://git-scm.com/book/en/v2/Git-Internals-Git-Objects)
+
+---
+
+## Query relaxation (`websearch_to_tsquery` joins bare terms with AND)
+
+**What it is:** when you hand `websearch_to_tsquery` a plain sentence, it ANDs every
+surviving word together. `"where are user credentials protected before being written to the
+database?"` compiles to `'user' & 'credenti' & 'protect' & 'written' & 'databas'` — a
+document must contain **all five** to match at all. Stopwords ("where", "are", "the") get
+dropped, but the rest are mandatory. **Query relaxation** means retrying with the terms
+OR'd together when the strict form returns too little.
+
+**Why we need it here:** this single behaviour was holding conceptual `recall` at exactly
+**0.00**. Not "ranked badly" — the retriever was returning an *empty list*, because almost
+no file contains every word of a natural-language question. Any amount of ranking work
+downstream is worthless if the candidate set is empty.
+
+**How it's used in Noetra:** `core/retrieval/lexical.py` runs the strict query first, and
+only if it returns fewer than `limit` hits does it run a second pass with the terms joined
+by ` OR ` and backfill the empty slots. Strict hits keep their positions, so the change
+**cannot** regress precision — and the eval proved it, since the symbol and keyword buckets
+came back byte-identical while conceptual moved. The OR query is built in *websearch
+syntax* (not raw `|` operators) so Postgres still does the stemming and still never raises
+on junk.
+
+**Is this standard?** Yes. Elasticsearch exposes it directly as `minimum_should_match`
+("match at least N of these terms"). Postgres has no equivalent, so the two-pass fallback
+is how you get the same behaviour.
+
+**Docs:** [Postgres — controlling text search](https://www.postgresql.org/docs/current/textsearch-controls.html) ·
+[Elasticsearch — `minimum_should_match`](https://www.elastic.co/docs/reference/query-languages/query-dsl/query-dsl-minimum-should-match)
+
+---
+
+## Vocabulary drift: match with the same stemmer the index used
+
+**What it is:** a full-text index doesn't store your words, it stores **lexemes** — stemmed,
+lowercased, stopword-filtered tokens. "credentials" is stored as `credenti`. If some other
+part of your code later tries to answer "where did this match?" using the *raw* words, it's
+searching a different vocabulary than the one that matched. That mismatch is vocabulary
+drift.
+
+**Why we need it here:** `_best_line` picked which line to cite by checking whether a query
+word appeared *literally* in the line. The index had matched on stems. So a file could match
+on `credenti` while the literal string "credentials" appeared nowhere — every line scored
+zero, and the function returned **line 1**. Retrieval found the right file and then threw the
+citation away. Six of nine remaining misses were this one bug.
+
+**How it's used in Noetra:** the fix is to *ask the engine for its own vocabulary* rather
+than re-derive it. `core/retrieval/lexical.py::_query_lexemes` runs
+`tsvector_to_array(to_tsvector('english', :query))`, which returns exactly the lexemes
+Postgres would use, then matches source words by **stem prefix** (`credenti` is a prefix of
+"credentials"). The tempting alternative — writing a stemmer in Python — would have
+reintroduced the exact drift being fixed, and would silently diverge whenever Postgres
+changed.
+
+**Is this standard?** The principle is general and worth naming: **never reimplement a
+component's normalization; ask it what it did.** Same reason you compare passwords with the
+library's `verify()` instead of re-hashing yourself, and why `ts_headline` exists rather than
+having you locate matches by hand.
+
+**Docs:** [Postgres — text search functions](https://www.postgresql.org/docs/current/functions-textsearch.html)
+
+---
+
+## AST chunking (the retrieval unit decides how good a citation can be)
+
+**What it is:** an **AST (abstract syntax tree)** is the structured tree a parser builds out
+of source code. Instead of a flat wall of text, the file becomes "this module contains a
+class, that class contains these three methods, each method runs from line X to line Y".
+Tree-sitter is what produces it here. **AST chunking** means cutting a file into search units
+along those **syntax boundaries** — one chunk per function/method — instead of by a fixed
+line or token count. The rule is that a chunk must never split a function in half, because
+half a function retrieves as noise.
+
+**Why we need it here:** the unit you index is the unit you can cite. Indexing whole *files*
+means a hit is "this file matched" and something has to *guess* which line to point at —
+which is exactly the bug above. Indexing *chunks* means the line range comes free and exact,
+because the chunk already knows its own boundaries. It also decides what the M6 agent
+receives: a file-level hit forces a second `read_file` call that pulls ~1,200 lines into
+context to answer a question about 25 of them; a chunk-level hit *is* the answer.
+
+**How it's used in Noetra:** `indexer/chunker.py` (pure, no DB) emits one chunk per **leaf
+entity** — an entity containing no other entity, so a class produces chunks for its methods
+rather than a second copy of the whole class — plus **gap chunks** covering every line no leaf
+covers (imports, module constants, class headers, and whole files with no entities at all,
+like markdown or JSON). Gaps have no syntax to damage, so only they get split at a fixed size
+(`MAX_GAP_LINES = 80`). Measured effect: keyword `recall@5` went 0.79 to 0.93.
+
+**Is this standard?** Yes, and it's the consensus for code specifically — fixed-size chunking
+is the default for prose but actively harmful for source, where a function is the natural
+semantic unit. Note chunking is **independent of embeddings**: it's a prerequisite for them,
+but it pays off on its own through exact citations and smaller agent payloads.
+
+**Docs:** [Anthropic — contextual retrieval](https://www.anthropic.com/news/contextual-retrieval)
+
+---
+
+## Result diversity ("collapsing") and the SQL window function that does it
+
+**What it is:** capping how many results a single group (here, one file) may contribute, so
+one strongly-matching document can't fill the entire result list and hide everything else.
+Search engines call this **collapsing**; the general idea is trading a little raw relevance
+for coverage.
+
+**Why we need it here:** switching to chunks quietly *regressed* `recall@20` from 0.79 to
+0.74. The cause wasn't ranking — it was arithmetic. Twenty slots used to mean twenty distinct
+**files**; with chunks it could mean twenty chunks from **ten** files. On one query,
+`docs/CONCEPTS.md` alone took **8 of 20 slots**. The file holding the answer never appeared,
+and a caller can't recover a file it was never shown.
+
+**How it's used in Noetra:** `core/retrieval/lexical.py` uses a **window function** —
+`row_number() OVER (PARTITION BY file_id ORDER BY rank DESC)` — then keeps only rows where
+that number is at most `_MAX_CHUNKS_PER_FILE`. A window function computes a value *per row
+relative to a group of other rows*, without collapsing them the way `GROUP BY` does; here it
+ranks each file's chunks against each other. It has to happen in SQL, in a subquery, because
+`LIMIT 20` would otherwise have already discarded every file past the crowding one — capping
+in Python afterwards would be too late.
+
+**Is this standard?** Yes — Elasticsearch has a `collapse` parameter for exactly this;
+maximal marginal relevance (MMR) is the more general form used in RAG pipelines. Window
+functions are core SQL, not a Postgres extension.
+
+**Docs:** [Postgres — window functions](https://www.postgresql.org/docs/current/tutorial-window.html) ·
+[Elasticsearch — collapse](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/collapse-search-results)
+
+---
+
+## Query-time boosting (weighting one class of document above another)
+
+**What it is:** multiplying a relevance score up or down based on what *kind* of document it
+is, rather than how well it matched. A factor of 0.3 on a class means those documents need
+roughly 3x the raw score to outrank a normal one.
+
+**Why we need it here:** an `english` text-search config is built for English prose, so on a
+natural-language query it ranks *writing about* code far above the code itself. Diagnosing the
+chunking regression showed noetra's entire top-20 was `docs/*.md` — not one source file — and
+requests was returning `HISTORY.md` and **`LICENSE`** ahead of the module that implements the
+behaviour. For a tool whose product is `file:line` citations into source, that's simply wrong.
+
+**How it's used in Noetra:** `core/retrieval/lexical.py` multiplies `ts_rank` by
+`_NON_SOURCE_RANK_FACTOR = 0.3` where `file.language IS NULL` — which is already exactly the
+non-py/js/ts set, so no new data was needed. Docs stay reachable, just below code. This was
+the single largest fix of the session: conceptual `recall@5` went 0.14 to 0.36 and overall
+`@20` went 0.76 to 0.81.
+
+**Is this standard?** Yes — per-field and per-index boosts are a basic feature of every search
+engine (Elasticsearch `boost`, Lucene field weights). The general lesson is that *relevance
+and importance are different things*, and a scorer only knows the first one.
+
+**Docs:** [Elasticsearch — bool query and boosting](https://www.elastic.co/docs/reference/query-languages/query-dsl/query-dsl-bool-query)
+
+---
+
+## When your eval can't referee the change you're making
+
+**What it is:** a benchmark can only judge a change if its answer key is *neutral* about that
+change. If every correct answer happens to sit in the category you just promoted, the score
+goes up whether or not the change was good — the metric is measuring your assumption back at
+you rather than testing it.
+
+**Why we need it here:** all 42 original questions had answers in **source files**. So
+demoting non-source files (the boost above) was guaranteed to improve the number, no matter
+how far the penalty was cranked. Setting the factor to 0.001 would have "scored better" while
+making documentation permanently unreachable. The number was real; its *interpretation* wasn't
+safe.
+
+**How it's used in Noetra:** `eval/questions.yaml` gained a fourth question kind, `docs`, with
+4 questions whose answers genuinely live in prose (`DEPLOYMENT.md`, `quickstart.rst`,
+`advanced.rst`, `metadata.mdx`). They aren't retrieval targets — they're a **guard-rail**: if
+the penalty is ever tuned too hard, that row collapses and says so. It reported `@5 0.75` /
+`@20 1.00`, confirming 0.3 demotes docs without burying them. Making it a *separate kind*
+rather than more `conceptual` questions kept every existing bucket's denominator unchanged, so
+all earlier runs stayed comparable.
+
+**Is this standard?** The failure mode has names — *benchmark gaming*, *construct validity*,
+and (when the metric becomes the target) **Goodhart's law**. The habit worth keeping: whenever
+you add an optimization, ask *"could this metric go up while the product gets worse?"* If yes,
+add the case that would catch it **before** trusting the number.
+
+**Docs:** [Goodhart's law](https://en.wikipedia.org/wiki/Goodhart%27s_law)
+
+---
+
+## Who calls a component changes what it gets fed (input distribution)
+
+**What it is:** the same function can be handed completely different-looking inputs depending
+on who is calling it, and a benchmark only tests the caller it imitates. The mix of inputs a
+component actually sees in production is its **input distribution**. Measure against the wrong
+one and you can spend weeks optimizing a case that never occurs — or miss one that does.
+
+**Why we need it here:** `core/retrieval.search()` has two callers with very different habits.
+The `/search` endpoint hands it whatever a human typed into a box, so it really does receive
+`"Why do header lookups work no matter how you capitalize them?"` word for word. The M6 chat
+agent will not: it reads the question, works out that the codebase probably calls this thing a
+"case-insensitive dict", and calls `code_search("case insensitive headers")`. Same function,
+two different worlds.
+
+The eval harness only imitates the first caller — it feeds every question in verbatim. So the
+`conceptual` bucket's low score is an **honest** measure of the search UI and a **pessimistic**
+one for the agent, because it charges retrieval for a translation step the agent would have
+done first. That distinction matters a lot, because the conceptual bucket is the main evidence
+in the "do we need embeddings (M7)?" decision — and half of what it's currently measuring is a
+step that won't exist in the agent path.
+
+**How it's used in Noetra:** noted so it doesn't get forgotten: when M6 lands, `eval/run.py`
+should score **agent-mediated** retrieval next to raw `search()` — same 42 questions, two
+columns. That's the only way the repo map (which never touches `search()` and so cannot move
+today's numbers at all) can earn its place the way every retriever has had to.
+
+**Is this standard?** Yes, and it's one of the most common ways benchmarks mislead. It's the
+same reason a model evaluated on clean text degrades on real user typos, and why "offline
+metric went up, online metric didn't" is a well-known result in search and recommender teams.
+The habit: before trusting a number, ask *"who generates the inputs in production, and is that
+who my harness is imitating?"*
+
+**Docs:** [Wikipedia — dataset shift](https://en.wikipedia.org/wiki/Dataset_shift)

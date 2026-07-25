@@ -201,3 +201,45 @@ Most recent entry last. Written by `/endsession`.
 - **zod resolved only 3 dependency edges** (monorepo with `@zod/*` alias/bare imports; our JS/TS resolver only follows relative `./ ../`). Expected, not a bug — but zod "what imports what" questions won't work; use symbol/keyword Qs there.
 - Seed must run in the **worker** container (has git + DB + `env_file: .env`), e.g. `docker compose exec worker python -m eval.seed`. `RetrievalHit` is Pydantic (mutable) — fusion mutates `sources` in place.
 - `_best_line` matches literal substrings while tsvector matches *stemmed* words — a stem-only match falls back to line 1. Minor; eval will show if it bites.
+
+---
+
+## Session — 2026-07-26 00:39
+
+**Worked on:** Milestone 5 — finished the eval harness, then used it as intended: measured a baseline, found real retrieval bugs, fixed them, and re-measured each time. Also built AST chunking (pulled forward from M7). Search UI still not built, so M5 is *not* complete.
+**Done:**
+- **`eval/run.py` + `eval/questions.yaml` (`a402485`):** 42 questions across noetra/requests/zod, every answer range read from the pinned SHA. Scorer records the *rank* of the first correct hit, so any `recall@k` falls out of one pass. Reports line-level (right file AND overlapping lines) next to file-level, so "found the file, cited the wrong line" is visible as its own failure mode. Validates every answer path against the seeded DB first — a typo'd path can't silently deflate the score. Added `pyyaml`.
+- **First baseline: line-level `recall@5` 0.60, `recall@20` 0.62.** symbol 1.00, keyword 0.79/0.86, **conceptual 0.00/0.00**.
+- **Query relaxation (`8a8400e`):** `websearch_to_tsquery` joins bare terms with **AND**, so a natural-language question demanded every term in one document and matched almost nothing. Now: strict pass first, then backfill unused slots from an OR'd rewrite. Strict hits keep their positions, so it cannot regress precision — keyword/symbol came back byte-identical, proving it. → `@20` 0.62→0.69.
+- **Citation fix (`dbd4a56`):** `_best_line` matched *literal substrings* while the index matched *stems*, and returned **line 1** when nothing matched. Now pulls Postgres' own lexemes via `tsvector_to_array(to_tsvector(...))` and matches by stem prefix, scoring each line with its neighbours so a lone term in an import loses to a dense block. → `@20` 0.69→0.79, keyword 0.86→0.93.
+- **AST chunking (`12c3c48`):** new `indexer/chunker.py` (pure, no DB), `Chunk` model, migration `7c1a4b9e2d33`, and a `chunking` pipeline stage. One chunk per **leaf entity** plus **gap chunks** covering everything else, so no line is unsearchable. `content_tsv` is generated over `embed_text` (the `path › class › signature` prefix + body), not raw content.
+- **Chunk-level retrieval (`8fad4dc`):** lexical now searches `chunks` instead of files, so every hit carries a real line range and `_best_line` no longer decides citations at all.
+  - On its own this **regressed** `@20` from 0.79 to 0.74. A diagnostic (count distinct files in the top 20) found two separate causes.
+  - **Cause 1 — crowding.** 20 slots used to mean 20 distinct files; with chunks it meant 20 chunks from 10 files. `docs/CONCEPTS.md` alone took 8 of 20 slots. Fixed with a per-file cap (`_MAX_CHUNKS_PER_FILE = 2`) applied in SQL via `row_number() OVER (PARTITION BY file_id ...)`, since `LIMIT` would otherwise discard the other files first.
+  - **Cause 2 — prose outranks code.** An `english` tsvector ranks writing *about* code above code. noetra's entire top-20 was `docs/*.md`; requests returned `HISTORY.md` and `LICENSE`. Fixed with a `ts_rank` penalty (`_NON_SOURCE_RANK_FACTOR = 0.3`) where `file.language IS NULL`.
+  - Both fixes together: `@5` 0.76, `@20` 0.81 — the regression recovered and then some.
+- **Docs guard-rail (`532d703`):** the prose penalty was measured against an answer set that is 100% source files, so it could only ever look good — cranking it to 0.001 would have "scored better" while making docs unreachable.
+  - Added a 4th question kind, `docs`, with 4 questions whose answers genuinely live in prose. If the penalty is ever tuned too hard, that row collapses and says so.
+  - Result `@5 0.75 / @20 1.00` — 0.3 demotes docs without burying them.
+  - Made it a *separate kind* rather than more `conceptual` questions, so the original three buckets keep their denominators and stay comparable to every earlier run.
+- **Net on the original 42: `recall@5` 0.60 → 0.76, `recall@20` 0.62 → 0.81, misses 16 → 8.** Zero AI, zero new services, one new dependency.
+**In progress:** M5's **search UI** is the only remaining deliverable and is not started. All three eval repos are re-seeded with chunks; DB head is `7c1a4b9e2d33`; working tree clean.
+**Key decisions:**
+- **Chunking before embeddings** — of the remaining misses, only **2 of 46** fail to surface the correct file at all; the rest are localization inside a file already found. Embeddings don't fix localization, chunking does — and chunking is a prerequisite for embeddings anyway, so it's step one either way, done in an order that makes step two optional.
+- **Leaf-entity chunks + gap chunks**, not one chunk per entity — avoids storing a class's source once per method, while gaps guarantee full coverage of docs/config files.
+- **Index the `tsvector` over `embed_text`, not `content`** — folds file path and enclosing class into the lexical index for free (contextual retrieval applied to the lexical leg).
+- **Migration hand-written, then verified by autogenerating a throwaway** — autogenerate proposes dropping the three raw-SQL GIN indexes it can't see. Throwaway's `upgrade()` contained *only* those three drops, proving model and migration agree; deleted after.
+- **`docs` as a 4th kind, not extra `conceptual` questions** — adds a guard-rail without shifting any existing bucket's denominator.
+**What we got wrong first (worth remembering — the docs above read like a clean run, and it wasn't):**
+- **Claimed the 0.00 conceptual score was purely a query-compilation bug.** The AND-joining was real and was starving the retriever, but the diagnostic showed the target file (`core/security.py`) contains none of "credentials / protected / written / database" — it says "encrypt", "token", "at rest", "DB". So OR-ing alone would not have found it either. Lesson: the mechanism was right, the conclusion was half wrong — verify a hypothesis before acting on it, even a well-reasoned one.
+- **Justified chunking with the wrong argument.** Sold it on recall ("6 of 9 misses are right-file-wrong-line"). Challenged on the grounds that the end product is an agent that reformulates queries anyway. The stronger justification came out of that: chunking is about the **payload** (a file-level hit forces a second `read_file` that drags ~1,200 lines into context to answer a question about 25) and about the **citation being true at all** (file-level citations are guessed, and "exact file + line citations" is the product's core promise). Also, the bucket chunking actually improved was **keyword** (0.79 → 0.93) — which is precisely the query shape the agent *will* send.
+- **Predicted the diversity regression as a "maybe" and shipped anyway.** It landed as a real `@20` regression, and the prose problem underneath it wasn't spotted at all until the diagnostic ran. Chunking is a net win now, but it took two follow-up fixes to get there.
+
+**Next step:** Build the **search UI** over `GET /api/v1/repos/{id}/search` to close M5. Then M6 (repo map + LangGraph agent).
+**Watch out for:**
+- **`CLAUDE.md`, `DATA_MODEL.md`, `LEARNING_LOG.md` are now behind the code.** `CLAUDE.md`'s build order still lists chunking under M7 though it shipped in M5; `DATA_MODEL.md`'s chunk table lists an `embedding vector(1536)` column the model deliberately omits (M7 + pgvector); `LEARNING_LOG.md` has no entry for any of this (M5 incomplete, so none was written).
+- **zod is the outlier and has not responded to any change** — 0.62 line-level vs 0.85 file-level, the widest gap of the three. Theory (unverified): `export const X = core.$constructor(...)` isn't extracted as an entity, so those regions land in 80-line gap chunks instead of function-aligned ones, and retrieval picks the wrong region inside the right file.
+- **`recall@20` is a soft bar at these repo sizes** (20 candidates ≈ 15–25% of a 60–130-file repo). Quote `@5`. Also, `overall` is now over n=46 and not directly comparable to the n=42 runs — track the by-kind rows.
+- **The eval feeds raw English to `search()`; the M6 agent never will** — it will reformulate first. So the conceptual bucket is realistic for the search UI and pessimistic for the agent path. When M6 lands, extend `run.py` to score agent-mediated retrieval alongside raw `search()`.
+- `_MAX_CHUNKS_PER_FILE = 2` and `_NON_SOURCE_RANK_FACTOR = 0.3` are untuned first guesses that happened to work; both are single-constant knobs the eval can settle.
+- Re-seeding after any chunker change is mandatory (`docker compose exec worker python -m eval.seed --force`) — chunks are built at index time, not query time.
