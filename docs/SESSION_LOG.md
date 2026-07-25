@@ -177,3 +177,27 @@ Most recent entry last. Written by `/endsession`.
 - No repo-size cap or disk-usage alerting added — the immediate leak (never cleaning up at all) is fixed; monitoring total disk usage is a separate, not-yet-needed concern.
 **Next step:** Milestone 5 — eval harness (~40 pinned questions → `recall@k`) + search endpoint/UI over lexical + structural retrieval, per `CLAUDE.md`'s build order. Still the next unstarted milestone.
 **Watch out for:** All `Repository` rows were deleted during this session's manual testing — the DB is currently empty of repos, and `/data/repos` was wiped clean to match (nothing orphaned left over). Also: `docker compose exec` on Windows/Git Bash mangles absolute Unix paths like `/data/repos` into Windows paths — prefix with `MSYS_NO_PATHCONV=1` when running shell commands against a container that need a literal leading-slash path.
+
+---
+
+## Session — 2026-07-25 04:13
+
+**Worked on:** Milestone 5 (retrieval + eval) — built the hybrid retrieval module, the search endpoint, and the eval-harness seeding; also a design discussion that reshaped M6/M7. Not finished (eval scorer + questions + search UI remain).
+**Done:**
+- **Docs (committed `4dcdd22`):** folded a **repo map** into M6 (AI-free PageRank-ranked table of contents from `code_entity` + `dependency_edge`, in the prompt prefix, to fix agentic search's blind first-guess on vague queries); made semantic retrieval an explicitly **conditional M7** (built only if the eval proves the cheap stack fails). Touched `CLAUDE.md`, `docs/RETRIEVAL.md`, `docs/FEATURES.md`.
+- **`core/retrieval/` module (committed `27070eb`):** `lexical.py` (full-text over `content_tsv` via `websearch_to_tsquery`/`ts_rank`, plus `_best_line` to turn a file match into a line citation), `structural.py` (symbol lookup over `code_entities` — exact + `pg_trgm` `%` fuzzy), `fusion.py` (RRF, `k=60`), `types.py` (`RetrievalHit`), `__init__.py` (`search()` entry point). Verified the pg_trgm `%` operator compiles under psycopg2.
+- **`/search` endpoint (in `27070eb`):** `GET /api/v1/repos/{id}/search?q=` in `api/repos.py`, ownership-checked, returns `list[RetrievalHit]` (FastAPI serializes the Pydantic model natively). Confirmed registered via OpenAPI.
+- **Refactor (committed `31fc158`):** extracted `index_repository_files(db, repo, repo_dir)` into new `worker/indexing.py`; `clone_repository` now owns clone/auth/status/lock/error-handling and calls it — so the eval seed indexes via the exact production path. (Minor: timing logs now split `clone` vs new `files` stage.)
+- **Eval seeding (committed `608cceb`):** `eval/repos.py` (3 repos pinned to SHAs: noetra `31fc158`, requests `69f8484`, zod `912f0f5`), `eval/seed.py` (clone-at-SHA + `index_repository_files`, deterministic `uuid5` ids, idempotent, `--force`). **Seeded all 3 into the DB** and ran the first live `search()` — it works and finds the right symbols/files.
+**In progress:** M5 eval harness — seeding done; **`eval/run.py` (scorer: recall@5/@20 scoreboard) and `eval/questions.yaml` (~40 pinned questions + answer keys) NOT built yet.** Search UI also still to build.
+**Key decisions:**
+- Repo map → **M6**, not M5 (it's agent-orientation, not a fusion retriever). Embeddings → **conditional M7** (measure-then-buy; eval decides).
+- Eval seed **borrows the logged-in user's stored OAuth token** (which has `repo` scope, `core/github.py` SCOPES) to clone private noetra — no PAT needed. `EVAL_GITHUB_TOKEN` is an optional CI override.
+- Eval lives under **`backend/eval/`** (shares the `/backend` import root; it's a benchmark, not a `tests/` unit suite — a pytest regression gate comes later once a baseline exists).
+- Pin eval repos to immutable **commit SHAs** so answer-key line numbers never drift; noetra pinned + indexed as a snapshot since we keep editing `develop`.
+**Next step:** Build `eval/run.py` (load `questions.yaml` → `search()` → recall@5/@20, broken down by `kind` (symbol/keyword/conceptual) and repo) and author `questions.yaml` (~40 Qs; grep noetra directly, read requests/zod at their SHA). Then the search UI.
+**Watch out for:**
+- **Fusion doesn't merge overlapping lexical+structural hits at the same location** — it keys on exact `(file_id, start_line, end_line)`, so a lexical line-hit `(15,15)` and structural entity `(16,34)` show as two rows. Deliberately deferred (interval-overlap merge) until the eval proves it costs recall — visibly happening in the smoke test.
+- **zod resolved only 3 dependency edges** (monorepo with `@zod/*` alias/bare imports; our JS/TS resolver only follows relative `./ ../`). Expected, not a bug — but zod "what imports what" questions won't work; use symbol/keyword Qs there.
+- Seed must run in the **worker** container (has git + DB + `env_file: .env`), e.g. `docker compose exec worker python -m eval.seed`. `RetrievalHit` is Pydantic (mutable) — fusion mutates `sources` in place.
+- `_best_line` matches literal substrings while tsvector matches *stemmed* words — a stem-only match falls back to line 1. Minor; eval will show if it bites.

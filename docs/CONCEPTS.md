@@ -914,3 +914,152 @@ row, then `celery_app.send_task("worker.tasks.delete_repository_clone", ...)`; t
 background job" is the standard shape for any resource with an expensive-to-remove
 side effect (large file uploads, temp directories, cache entries tied to a deleted
 record, etc.).
+
+---
+
+## `recall@k` and the "eval harness"
+
+**What it is:** `recall@k` measures a search system: *of all the correct answers that
+exist, how many did the search surface in its top `k` results?* `recall@k = (relevant
+items found in top k) / (total relevant items)`. Example: "where is `clone_repository`
+defined?" has one correct location; if the search returns it anywhere in the top 5,
+`recall@5 = 1/1 = 100%` for that question; average over ~40 questions to score the whole
+retriever. An **eval harness** is the test infrastructure that runs a fixed set of inputs
+through the system and auto-scores the output against known-correct answers — same idea as
+a unit-test suite, but scored with a metric instead of pass/fail.
+
+**Why we need it here:** retrieval quality is the whole product, and "the answers feel
+good" isn't a measurement. Without a number, every later change (add a retriever, change
+chunking, tune `k`) is guesswork and no regression can be attributed to a specific cause.
+
+**How it's used in Noetra:** `backend/eval/` — `questions.yaml` (~40 questions, each with
+known answer `path`+`lines`, tagged `symbol`/`keyword`/`conceptual`), `seed.py` (indexes 3
+SHA-pinned repos), and `run.py` (runs each question through `core.retrieval.search()` and
+prints `recall@5`/`recall@20`, broken down by kind + repo). The `conceptual` row is the
+go/no-go signal for whether M7 embeddings are worth building.
+
+**Family:** `recall@k` is order-*unaware* (in-top-k or not). Order-aware cousins: **MRR**
+(rewards the first correct hit being near rank 1), **MAP@k**, **NDCG@k** (graded
+relevance). We use `recall@k` because our ground truth is binary (a location is correct or
+not) — MRR is the natural add-on later if recall alone stops being diagnostic.
+
+**Is this standard?** Yes — the standard offline-evaluation setup for any
+retrieval/RAG/search system; NDCG is the most common in IR research.
+
+**Docs:** [Pinecone — offline retrieval evaluation](https://www.pinecone.io/learn/offline-evaluation/)
+
+---
+
+## Postgres full-text search (`tsvector` / `tsquery` / `ts_rank`)
+
+**What it is:** Postgres's built-in keyword search. It preprocesses text into a `tsvector`
+— a list of normalized, *stemmed* words with positions ("running"→"run") — and matches it
+against a `tsquery` with the `@@` operator. `ts_rank` scores how well a document matches,
+for ordering. Trigram search (`pg_trgm`) is a *separate*, fuzzier tool: it breaks strings
+into 3-char chunks and matches by overlap, so `createTok` finds `createToken` — good for
+identifiers/typos, where stemming-based full-text is wrong.
+
+**Why we need it here:** it's the "lexical" leg of retrieval — cheap, exact-ish keyword
+matching over file content and symbol names, already indexed at the DB level (a GIN index
+on `content_tsv`, a trigram GIN index on `code_entities.name`).
+
+**How it's used in Noetra:** `core/retrieval/lexical.py` runs
+`content_tsv @@ websearch_to_tsquery('english', :q)` ordered by `ts_rank`.
+`core/retrieval/structural.py` matches symbol names with the trigram `%` operator +
+`similarity()`. **Key choice — `websearch_to_tsquery`** (not `to_tsquery` or
+`plainto_tsquery`): it accepts raw Google-style user input (`auth OR "session cookie"`)
+and *never raises* on junk, whereas `to_tsquery` 500s on a stray space. That safety is why
+it's the right pick for a user-facing search box.
+
+**Is this standard?** Yes — `tsvector`+GIN is the standard way to do full-text search in
+Postgres without a separate engine (Elasticsearch etc.); `pg_trgm` is the standard
+fuzzy/substring companion.
+
+**Docs:** [Postgres full-text search](https://www.postgresql.org/docs/current/textsearch.html) ·
+[pg_trgm](https://www.postgresql.org/docs/current/pgtrgm.html)
+
+---
+
+## Reciprocal Rank Fusion (RRF)
+
+**What it is:** a way to merge several ranked lists into one using only each item's *rank
+position* — not the retrievers' raw scores. Formula: an item's fused score is `sum over
+lists of 1/(k + rank)`, with `k` a dampening constant (60 is the standard from the
+original paper). An item ranked #1 in a list contributes `1/61`; #2 contributes `1/62`;
+items that rank well in *several* lists rise to the top.
+
+**Why we need it here:** we have two (later three) retrievers whose scores aren't
+comparable — `ts_rank` (a full-text relevance float) and trigram `similarity` (0–1) live
+on totally different scales. Averaging them would be meaningless. RRF sidesteps the problem
+by throwing away the scores and using only rank order.
+
+**How it's used in Noetra:** `core/retrieval/fusion.py::reciprocal_rank_fusion` takes the
+lexical + structural ranked lists, keys each hit by its code location, sums `1/(k+rank)`,
+unions the source retrievers on duplicates, and returns the top hits. Adding the M7
+semantic leg is just one more list in the input — no other code changes. (Current
+limitation: it dedupes by *exact* line range, so the same location surfaced with slightly
+different ranges by two retrievers isn't merged yet — deferred until the eval shows it
+matters.)
+
+**Is this standard?** Yes — RRF is the go-to fusion method for hybrid search (keyword +
+vector); popular precisely because it's robust and needs zero score calibration.
+
+**Docs:** [Cormack et al., 2009 — the RRF paper (PDF)](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)
+
+---
+
+## Repo map (PageRank over the import graph)
+
+**What it is:** a compressed, names-only "table of contents" of a codebase — every file
+with just its top-level symbols (no bodies) — handed to an AI agent *before* it starts
+searching, so it orients from a floor plan instead of blindly guessing search terms.
+Because a big repo has too many symbols to list them all, you rank them with **PageRank**
+over the import graph (the same "important if many important things link to it" algorithm
+Google used for web pages) — a file many files import is probably central, so its symbols
+make the map; leaf files get trimmed.
+
+**Why we need it here:** agentic search (how the M6 chat agent will work — grep/read in a
+loop, like Claude Code, no embeddings) has one weak moment: the *first* tool call, where it
+must guess a search term with no sense of the codebase's shape. That's worst on vague
+questions ("how is auth implemented?"). The repo map replaces that blind first guess with
+an informed one — built entirely from data we already have, with zero AI calls.
+
+**How it's used in Noetra:** scoped into **Milestone 6** (not built yet). It'll be built
+from `code_entity` (symbol names) + `dependency_edge` (import graph → PageRank centrality)
+and placed in the agent's byte-stable prompt prefix (so OpenAI prompt caching keeps it free
+per follow-up). Caveat: raw centrality over-ranks generic utilities (a `utils.py` everyone
+imports) — PageRank dampens but doesn't fully fix this; fine, because the map only needs to
+*orient* the agent, which then verifies by reading files.
+
+**Is this standard?** The pattern comes from **aider** (an open-source coding agent), which
+runs PageRank over the repo's dependency graph to build its "repo map". Using a lightweight
+structural map to steer an agent is an increasingly common technique.
+
+**Docs:** [aider — repository map](https://aider.chat/docs/repomap.html)
+
+---
+
+## Commit SHA & "pinning" to one
+
+**What it is:** a **SHA** is the ID git computes for every commit from its exact contents
+(file tree + message + parent + author). Change one byte → completely different SHA. The
+key property: a SHA points at one **immutable, frozen snapshot** of the code, forever —
+called *content-addressing* (the address is a fingerprint of the content). "Pinning" means
+referring to code by its SHA instead of by a moving name.
+
+**Why we need it here:** the eval's answer keys ("question X → `fusion.py` lines 23–48") are
+only correct against one exact version of the code. A **branch** name (`main`) moves every
+time upstream commits — line 40 becomes line 55 tomorrow — and even **tags** can be
+re-pointed. A SHA can't move, so the keys stay valid forever. It matters double for noetra,
+since we actively edit it: pinning to a SHA and indexing that snapshot keeps its keys stable
+no matter how much `develop` changes afterward.
+
+**How it's used in Noetra:** `eval/repos.py` pins each eval repo to a 40-char SHA;
+`eval/seed.py` does `git fetch --depth 1 origin <sha>` + `git checkout <sha>` to get that
+exact tree.
+
+**Is this standard?** Yes, everywhere — pinning dependency versions in a lockfile, pinning a
+Docker image by digest (`@sha256:…`) instead of `:latest`. The pattern is always: *replace a
+name that can move with a fingerprint that can't, for reproducibility.*
+
+**Docs:** [Git — commit objects & SHAs](https://git-scm.com/book/en/v2/Git-Internals-Git-Objects)
