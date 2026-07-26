@@ -243,3 +243,26 @@ Most recent entry last. Written by `/endsession`.
 - **The eval feeds raw English to `search()`; the M6 agent never will** — it will reformulate first. So the conceptual bucket is realistic for the search UI and pessimistic for the agent path. When M6 lands, extend `run.py` to score agent-mediated retrieval alongside raw `search()`.
 - `_MAX_CHUNKS_PER_FILE = 2` and `_NON_SOURCE_RANK_FACTOR = 0.3` are untuned first guesses that happened to work; both are single-constant knobs the eval can settle.
 - Re-seeding after any chunker change is mandatory (`docker compose exec worker python -m eval.seed --force`) — chunks are built at index time, not query time.
+
+---
+
+## Session — 2026-07-26 16:59
+
+**Worked on:** Q&A on how lexical/structural retrieval and chunking actually work, which led to measuring and then removing structural retrieval from the fusion.
+**Done:**
+- Walked lexical search (query relaxation, per-file cap, non-source penalty), structural search (exact + trigram-fuzzy `code_entity` lookup), RRF fusion, and AST chunking with concrete examples from the real code.
+- Clarified a real gap the user's mental model assumed existed: there is **no call-graph** anywhere in the codebase — `dependency_edge` is file-level import resolution only, not "who calls this function." No inheritance data either (`CodeEntity` has no base-class field).
+- Ran the actual ablation the eval harness exists to enable: brought up `docker compose`, seeded the 3 eval repos (already seeded from a prior session), ran `eval.run` with structural search stubbed out of `core/retrieval/search()` vs. left in. **Hybrid: recall@5 0.76 / @20 0.83. Lexical-only: recall@5 0.72 / @20 0.78.** The one symbol question that flips is `$ZodRegistry` — a `$`-prefixed identifier the Postgres text-search tokenizer mangles; trigram similarity doesn't care about `$`, so structural still found it.
+- Discussed (and rejected, unmeasured) a call-graph-seeded RRF pattern the user found elsewhere — seeding a "structural" retriever's graph expansion from the top semantic/lexical hit. Rejected because: (a) it needs call-graph extraction Noetra doesn't have, (b) it targets the wrong failure bucket (the actual weak spot is `conceptual`, which is M7's job, not graph traversal), (c) it couples retrievers together (seeding from a wrong top hit reinforces the mistake) where the current independent-retriever-then-RRF design deliberately keeps errors uncorrelated.
+- **Decision: strip structural retrieval entirely**, given a +0.04 recall@5 win didn't justify the complexity for this project's scale. Deleted `core/retrieval/structural.py`; simplified `search()` to lexical-only; cleaned `RetrievalHit`/`RetrieverSource`/`fusion.py` of now-dead `entity_name`/`entity_kind`/`STRUCTURAL` fields; updated frontend (`search.ts`, `SearchPanel.tsx`) to match; wrote and applied migration `7a96b345a5d0` dropping the now-unused `ix_code_entities_name_trgm` pg_trgm index (verified gone via `pg_indexes`); updated `CLAUDE.md`, `docs/RETRIEVAL.md` (added a decision record + a "Deferred: call-graph extraction" section), `docs/FEATURES.md`, `docs/DATA_MODEL.md`, `docs/CONCEPTS.md` to match. Re-ran the eval post-removal to confirm it reproduces the lexical-only ablation numbers exactly. Committed as `24e3e88`.
+**In progress:** Nothing code-wise — this was a complete, scoped removal, verified end-to-end. M5's search UI is still the open item from the prior session (not touched this session).
+**Key decisions:**
+- **Cut structural retrieval, not just documented the tradeoff** — the project's own rule ("no retriever joins the fusion without a `recall@k` movement that justifies it") cuts both ways; a measured, marginal, single-edge-case win wasn't enough to keep it.
+- **Removed the planned `find_symbol` agent tool from `docs/RETRIEVAL.md`'s M6 tool list** — it was structural's agent-facing form; `code_search` (lexical) already covers the same ground per the eval.
+- **Call-graph extraction stays deferred, not built** — no measured need yet; added as a concrete, evidence-gated V2 item in `CLAUDE.md` rather than left as vague scope creep risk.
+- **Dropped the DB index in this session rather than leaving it** — user explicitly asked; a new Alembic migration was the correct mechanism (code removal alone doesn't touch schema), applied to the local dev DB and confirmed via `pg_indexes`.
+**Next step:** Build the search UI (still the open M5 item — unaffected by this session's changes beyond `RetrievalHit` no longer carrying `entity_name`/`entity_kind`). Then M6 (repo map + LangGraph agent, now `code_search`/`read_file`/`list_dependencies` — three tools, not four).
+**Watch out for:**
+- **`docker compose` services were left running** from this session's ablation work (`db`, `redis`, `api`, `worker`) — not stopped, since a future session will likely want them again.
+- **`eval/questions.yaml`'s pinned `noetra` snapshot (SHA `31fc158`) still contains `structural.py`** — one keyword question's answer path points at it. This is correct and expected: the eval repo is a frozen historical snapshot, not `develop`, so it stays valid regardless of what `develop` deletes later.
+- **`pg_trgm` the Postgres extension itself was left enabled** — only the index that used it was dropped. Removing the extension too is a separate, not-yet-necessary call.
