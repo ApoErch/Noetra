@@ -1,0 +1,72 @@
+# Stack
+
+What we use and why. Versions are pinned in `backend/pyproject.toml` and `web/package.json`
+— read those for exact numbers; this doc is the reasoning.
+
+## Frontend
+
+| Piece | Why |
+|---|---|
+| **React + TypeScript** | Strict mode both sides. Contracts validated at the boundary, never hand-maintained twice. |
+| **Vite** | Dev server + build. |
+| **Tailwind** | Always-dark theme, one deliberate palette — no light/dark split to maintain. |
+| **Monaco** | The VS Code editor. Read-only viewer with decorations for cited line ranges, which is what makes a citation *clickable* rather than just printed. Types are hand-rolled to avoid an ~80 MB devDependency. |
+| **TanStack Query** | Server-state cache: polling repo status during indexing, request dedup, no hand-written loading/error state. |
+
+## Backend
+
+| Piece | Why |
+|---|---|
+| **FastAPI + Pydantic v2** | REST under `/api/v1`, validated at the HTTP boundary. Free OpenAPI schema for frontend type generation. |
+| **SQLAlchemy 2.0** | Typed ORM. Models in `core/models.py`. |
+| **Alembic** | Migrations as a revision chain. **Always read a generated migration before applying it** — autogenerate can't see hand-written raw-SQL indexes and will propose dropping them. |
+| **Celery + Redis** | Redis is both the Celery broker and the per-repo index lock. Anything touching a repo is a Celery task — never inline in `api`. |
+| **Postgres + pgvector** | Single source of truth. pgvector keeps embeddings in the same DB, so there's no second datastore in V1. |
+| **Tree-sitter** | Language-agnostic parser (one API, many grammars) producing a concrete syntax tree — vs. a per-language tool like Python's `ast`. Grammars: python, javascript, typescript (the last ships two languages, one for `.ts` and one for `.tsx`). |
+| **LangGraph** | Runs the agent's state machine. We write the graph; it executes it. See `RETRIEVAL.md`. |
+| **uv** | One venv for the whole backend. App layout (`package = false`) — `api`/`worker`/`core`/`indexer` are plain importable packages, not installed distributions. |
+
+## AI provider — Google Gemini
+
+One provider, both uses, **behind a single interface in `core/ai`**. Nothing outside that
+module imports the Gemini SDK. Two narrow seams — "streamed completion given messages +
+tools" and "embed these strings" — which is the entire cost of switching providers later.
+
+| | Model | Notes |
+|---|---|---|
+| Chat | `gemini-2.5-flash` | Agent loop. Free tier. |
+| Embeddings | `gemini-embedding-001` | **1536 dims** (truncated from its 3072 default). |
+
+**Why 1536 and not 3072:** pgvector's HNSW index caps the `vector` type at 2000 dimensions —
+3072 would force the `halfvec` type. 1536 is a Google-recommended Matryoshka size and keeps
+the column on the well-trodden path.
+
+Three provider details that are easy to get wrong and are `core/ai`'s job to absorb:
+
+- **`gemini-embedding-001` only pre-normalizes at 3072.** At 1536 we L2-normalize
+  client-side or cosine distance is silently wrong — degraded recall, no error.
+- **Input caps at 2048 tokens** (~8 KB). Some leaf-entity chunks exceed it; truncate first.
+- **`task_type` is asymmetric.** `RETRIEVAL_DOCUMENT` when indexing, `CODE_RETRIEVAL_QUERY`
+  when querying. Using one for both sides is a quiet mistake.
+
+### Free-tier limits are a design constraint
+
+`gemini-2.5-flash` is roughly **10 RPM / 250 RPD** and one agent turn is 3–6 model calls.
+That shapes architecture, not just testing:
+
+- The agent eval (~200 calls for a full pass) **must checkpoint per question and resume**.
+- The embedding stage must batch, rate-limit, and back off on 429 — and `chunk.embedding` is
+  **nullable** precisely so it can select `WHERE embedding IS NULL` and resume rather than
+  re-embed a whole repo.
+
+Get a key at <https://aistudio.google.com/apikey>. Env vars in `.env.example`; see `SETUP.md`.
+
+## Infrastructure
+
+- **Docker Compose** locally: `db` (`pgvector/pgvector:pg16`), `redis`, `api` (uvicorn),
+  `worker` (celery). `api` and `worker` build from the same image with different entrypoints.
+- **GitHub Actions** CI.
+- **AWS** deploy target — phased, see `DEPLOYMENT.md`.
+
+Coding conventions that apply across all of this (strict typing, secrets via env, scoping by
+`repository_id`) live in `CLAUDE.md` — that's the authority, don't duplicate them here.

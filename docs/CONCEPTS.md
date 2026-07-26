@@ -520,7 +520,17 @@ prompt" fast path is noted as a clean V2 seam.
 — for single-user tools on bounded corpora. The trade-off is well known: CAG buys
 simplicity and zero index-build time, and pays for it in per-query cost and corpus size.
 
-**Docs:** [OpenAI prompt caching](https://platform.openai.com/docs/guides/prompt-caching)
+**Update (provider swap → Gemini):** the borrowed idea still holds, but the mechanism has a
+caveat worth knowing. Gemini 2.5 Flash does **implicit caching** — automatic, no API change,
+you just get a discount when a request shares a prefix with a recent one. Unlike OpenAI's,
+it only kicks in **above a minimum prompt length** (order of ~1k tokens), so a short prefix
+gets cached-nothing rather than a small win. That's an argument *for* a substantial repo map
+in the prefix, not against one. There is also **explicit caching** (you create a cache
+object and reference it) if implicit ever proves too unreliable to depend on.
+
+**Docs:** [Gemini context caching](https://ai.google.dev/gemini-api/docs/caching) ·
+[OpenAI prompt caching](https://platform.openai.com/docs/guides/prompt-caching) (the
+original reference for this entry)
 
 ---
 
@@ -1027,18 +1037,19 @@ over the import graph (the same "important if many important things link to it" 
 Google used for web pages) — a file many files import is probably central, so its symbols
 make the map; leaf files get trimmed.
 
-**Why we need it here:** agentic search (how the M6 chat agent will work — grep/read in a
-loop, like Claude Code, no embeddings) has one weak moment: the *first* tool call, where it
-must guess a search term with no sense of the codebase's shape. That's worst on vague
-questions ("how is auth implemented?"). The repo map replaces that blind first guess with
-an informed one — built entirely from data we already have, with zero AI calls.
+**Why we need it here:** agentic search (how the chat agent works — search/read in a loop,
+like Claude Code) has one weak moment: the *first* tool call, where it must guess a search
+term with no sense of the codebase's shape. That's worst on vague questions ("how is auth
+implemented?"). The repo map replaces that blind first guess with an informed one — built
+entirely from data we already have, with zero AI calls.
 
-**How it's used in Noetra:** scoped into **Milestone 6** (not built yet). It'll be built
-from `code_entity` (symbol names) + `dependency_edge` (import graph → PageRank centrality)
-and placed in the agent's byte-stable prompt prefix (so OpenAI prompt caching keeps it free
-per follow-up). Caveat: raw centrality over-ranks generic utilities (a `utils.py` everyone
-imports) — PageRank dampens but doesn't fully fix this; fine, because the map only needs to
-*orient* the agent, which then verifies by reading files.
+**How it's used in Noetra:** scoped into **Milestone 8** (not built yet — renumbered when
+the build order moved to agentic RAG). It'll be built from `code_entity` (symbol names) +
+`dependency_edge` (import graph → PageRank centrality) and placed in the agent's byte-stable
+prompt prefix, so Gemini's implicit prefix caching keeps it cheap per follow-up (see the CAG
+entry above for the minimum-prompt-length caveat). Caveat: raw centrality over-ranks generic
+utilities (a `utils.py` everyone imports) — PageRank dampens but doesn't fully fix this;
+fine, because the map only needs to *orient* the agent, which then verifies by reading files.
 
 **Is this standard?** The pattern comes from **aider** (an open-source coding agent), which
 runs PageRank over the repo's dependency graph to build its "repo map". Using a lightweight

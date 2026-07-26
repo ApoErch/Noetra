@@ -1,6 +1,6 @@
 # Data Model
 
-PostgreSQL + `pgvector`. SQLAlchemy models in `core/db`. Everything scoped by
+PostgreSQL + `pgvector`. SQLAlchemy models in `core/models.py`. Everything scoped by
 `repository_id`. Types are conceptual — refine in implementation.
 
 ## Entities
@@ -64,10 +64,11 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/db`. Everything scoped by
 | start_line | int | |
 | end_line | int | |
 | content | text | the chunk source, as returned to the model |
-| embed_text | text | what was actually embedded: the context prefix (`path › class › signature`) plus `content`. Stored so a re-embed is reproducible and so you can see what the model saw. See `RETRIEVAL.md` → chunking rule. |
-| embedding | vector(1536) | pgvector. 1536 = OpenAI `text-embedding-3-small`. Switching to `-large` means `vector(3072)` and a migration + full re-embed — or use OpenAI's `dimensions` parameter to truncate `-large` down to 1536 and keep the column as-is. |
+| embed_text | text | what was actually embedded: the context prefix (`path › class › signature`) plus `content`. Stored so a re-embed is reproducible and so you can see what the model saw. Also what `content_tsv` is generated over, so the lexical leg gets the context prefix for free. See `RETRIEVAL.md` → chunking rule. |
+| content_tsv | tsvector, generated | **powers lexical retrieval.** `to_tsvector('english', coalesce(embed_text, ''))`, GIN-indexed. Self-maintaining, like `file.content_tsv`. |
+| embedding | vector(1536), **nullable** | pgvector. 1536 = `gemini-embedding-001` truncated from its 3072 default (Matryoshka). Why 1536 and not 3072: pgvector's **HNSW index caps the `vector` type at 2000 dims** — 3072 would force `halfvec`. Vectors are **L2-normalized client-side**, since `gemini-embedding-001` only pre-normalizes at 3072. **Nullable is load-bearing**: the embedding stage selects `WHERE embedding IS NULL`, so a rate-limit failure resumes instead of restarting the whole repo. |
 
-### dependency_edge  *(import graph — powers `list_dependencies`; V2 architecture view)*
+### dependency_edge  *(file-level import graph — `list_dependencies`; V2 architecture view)*
 | field | type | notes |
 |-------|------|-------|
 | id | uuid (pk) | |
@@ -75,6 +76,23 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/db`. Everything scoped by
 | from_file_id | uuid (fk) | |
 | to_file_id | uuid (fk) | |
 | kind | enum | `import` |
+
+### reference_edge  *(call graph — powers `get_callers`/`get_callees` and the M7 graph leg)*
+
+Distinct from `dependency_edge`: that one is **file → file** ("does `a.py` import `b.py`"),
+this one is **entity → entity** ("does `handler()` call `decrypt_token()`"). Resolution is
+**name-based** against the symbol table — no type inference — preferring same-file then
+imported-file candidates, and writing **all** candidates when a name is genuinely ambiguous.
+That's the standard "poor man's call graph"; it's approximate on purpose, because it only
+has to orient an agent that then reads the real file.
+
+| field | type | notes |
+|-------|------|-------|
+| id | uuid (pk) | |
+| repository_id | uuid (fk) | |
+| from_entity_id | uuid (fk → code_entity) | the caller |
+| to_entity_id | uuid (fk → code_entity) | the callee |
+| line | int | the call site, for citations |
 
 ### metric  *(basic only in V1; jsonb so new metrics need no migration)*
 | field | type | notes |
@@ -98,14 +116,21 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/db`. Everything scoped by
 ## Relationships
 
 ```
-user 1───* repository 1───* file 1───* code_entity
-                       │           │
-                       │           1───* chunk (1───1 embedding)
-                       │           │
-                       │           *───* dependency_edge
+user 1───* repository 1───* file 1───* code_entity *───* reference_edge
+                       │           │        ▲              (entity → entity: calls)
+                       │           │        │
+                       │           1───* chunk ──┘ (chunk.entity_id, nullable —
+                       │           │              this is what resolves a search hit
+                       │           │              back to a symbol the graph can walk)
+                       │           *───* dependency_edge  (file → file: imports)
                        ├───* metric
                        └───* chat_message
 ```
+
+`chunk.entity_id` carries more weight than it looks. It's how the M7 graph leg turns a
+ranked *chunk* into a *seed entity*, and how it turns an expanded entity back into a
+chunk-aligned `RetrievalHit` — which RRF requires, since it dedupes on
+`(file_id, start_line, end_line)`. Gap chunks have it null and simply don't seed.
 
 ## Indexes, and when each lands
 
@@ -114,14 +139,16 @@ staging is what the build order in `CLAUDE.md` rests on.
 
 | index | purpose | milestone |
 |-------|---------|-----------|
-| GIN on `file.content_tsv` | lexical retrieval | **M4** — one migration, no pipeline cost |
-| `code_entity(repository_id, name)` | symbol lookup (chunking, M6 repo map) | **M4** |
+| GIN on `file.content_tsv` | lexical retrieval over whole files | **M4** — one migration, no pipeline cost |
+| `code_entity(repository_id, name)` | symbol lookup (chunking, call resolution, M8 repo map) | **M4** |
 | `file(repository_id, content_hash)` | incremental re-index | **M4** |
-| HNSW on `chunk.embedding` | semantic retrieval | **M7** — after evals justify it |
+| GIN on `chunk.content_tsv` | lexical retrieval over chunks (what `search()` actually uses) | **M5** |
+| HNSW on `chunk.embedding` | semantic retrieval | **M6** |
+| `reference_edge(repository_id, to_entity_id)` | `get_callers` — the reverse direction, which is the one that needs the index | **M7** |
 
 HNSW over IVFFlat for the vector index: it needs no training step and no "how many lists?"
 tuning pass, and query recall is better at V1 scale. IVFFlat wins on build time at very
-large row counts, which is not a problem V1 has.
+large row counts, which is not a problem V1 has. Operator class is `vector_cosine_ops`.
 
 ## Deferred to V2 (not created in V1)
 

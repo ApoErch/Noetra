@@ -139,4 +139,23 @@ App instead, a bigger integration change deferred rather than taken on here.
 
 **Tricky part:** Three things worth remembering. First, one fix — demoting documentation below source code — was measured against an answer key where every correct answer *was* source code, so it could only ever look good; I added four questions whose answers genuinely live in documentation purely as a guard-rail against tuning it too far, which is a habit worth keeping whenever an optimization and a metric point the same direction. Second, chunking is independent of embeddings: it's a prerequisite for them, but it pays for itself through exact citations and smaller payloads, so the expensive milestone stayed unbuilt and still isn't justified — only 2 of 46 questions fail to surface the right file at all. Third, a genuinely confusing bug: Celery workers have no auto-reload, so after adding the chunking stage the long-running worker kept executing the version of the pipeline it had loaded at startup while the API (which does auto-reload) had already switched to reading the new table. The reader was updated and the writer wasn't, and the only symptom was a search that silently returned nothing.
 
+**Addendum — using the harness to *delete* a feature.** After M5 shipped, I ran the ablation
+the harness exists to enable: the same 46 questions with and without the second retriever
+(fuzzy symbol-name lookup over the symbol table) in the fusion. It was worth `recall@5` 0.76
+vs. 0.72 — real, but every point of it came from a single question in a single repo, an
+identifier (`$ZodRegistry`) whose `$` the Postgres text-search tokenizer mangles. Everything
+else it found, keyword search already found on its own, because AST chunking means a
+function's own definition line is usually the top keyword hit for its name anyway.
+
+So I removed it: deleted the module, simplified the entry point, dropped the now-unused
+database index in its own migration, and re-ran the eval to confirm the numbers reproduced
+exactly. The project's rule — *no retriever joins the fusion without a `recall@k` movement
+that justifies it* — cuts both ways, and the interesting half is the second one. Most teams
+only ever use a benchmark to justify adding things. The number that lets you add a feature
+is the same number that lets you delete one, and deleting is where it's actually rare.
+
+Worth being precise in interviews about *what* was cut, because the name is overloaded: this
+was symbol-**name** lookup, not graph traversal. Call-graph retrieval ("who calls this?") is
+a different thing on different data and is being built in M7.
+
 <!-- Add new entries above this line, most recent last -->

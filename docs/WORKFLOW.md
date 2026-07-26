@@ -31,11 +31,13 @@ Repository dashboard
 3. **Indexing** — runs in the worker (below); UI shows progress by stage.
 4. **Explore** — surfaces unlock progressively as the pipeline advances, not all at once
    when it finishes:
-   - after `cloning` — the **file tree browser** and **lexical search**. Both need only
-     `file.path` / `file.content`, which clone persists, plus the `tsvector` index built
-     in the same stage. Neither waits on the symbol table or on embeddings.
-   - after `parsing` — **symbol lookup** ("where is `createToken` defined?").
-   - at `ready` — **chat**, full hybrid search, and metrics.
+   - after `cloning` — the **file tree browser**. Needs only `file.path` / `file.content`,
+     which clone persists.
+   - after `chunking` — **lexical search**. `search()` runs over `chunk.content_tsv`, so it
+     needs chunks to exist; the `tsvector` is a generated column, so there's no separate
+     index step once they do.
+   - after `embedding` — **fused lexical + semantic search**.
+   - at `ready` — **chat** and metrics.
 
    This staging is the point of the pipeline order below. On a large repo the embedding
    stage dominates wall-clock time; gating everything behind it would mean staring at a
@@ -51,32 +53,40 @@ queued
   │
   ▼
 cloning        git clone into worker storage; persist a `file` row per tracked path
-  │            with its raw content, and build the lexical index over it
-  │            → FILE TREE + LEXICAL SEARCH USABLE FROM HERE
+  │            with its raw content
+  │            → FILE TREE USABLE FROM HERE
   ▼
 parsing        walk every py/js/ts file; Tree-sitter per language
-  │            extract: files, functions, classes, methods, imports  → SYMBOL TABLE
+  │            extract: functions, classes, methods → SYMBOL TABLE
+  │            plus imports, and call sites (M7)
   ▼
-graphing       resolve the imports parsing already extracted → dependency edges
-  │            (data only in V1 — no visualization until V2)
+graphing       resolve what parsing extracted → dependency_edge (file → file imports)
+  │            and reference_edge (entity → entity calls, M7)
   ▼
-chunking       AST-aware chunks (by function/class, never fixed windows)
-  │
+chunking       AST-aware chunks (by function/class, never fixed windows), each with
+  │            its context prefix; content_tsv generates itself over embed_text
+  │            → LEXICAL SEARCH USABLE FROM HERE
   ▼
-embedding      embed each chunk (OpenAI text-embedding-3-small) → vector in pgvector
-  │            ← the slow, expensive, network-bound stage. Deliberately last.
+embedding      embed each chunk's embed_text (gemini-embedding-001, 1536 dims) → pgvector
+  │            ← the slow, network-bound, rate-limited stage. Deliberately last.
+  │            → FUSED LEXICAL + SEMANTIC SEARCH USABLE FROM HERE
   ▼
 metrics        basic aggregates: file count, function count, total LOC,
   │            language breakdown, largest files
   ▼
-ready          everything persisted; chat + full hybrid search + dashboard unlock
+ready          everything persisted; chat + dashboard unlock
 ```
 
-**Why this order.** Everything deterministic and local (lexical index, symbol table,
-import graph) runs before the one stage that makes thousands of network calls and costs
-money. Two payoffs: the user gets a usable product early in the run rather than only at
-the end, and a failure in `embedding` leaves a repo that is still searchable and browsable
-instead of one that is worthless.
+**Why this order.** Everything deterministic and local (symbol table, graphs, chunks +
+their lexical index) runs before the one stage that makes thousands of network calls
+against a rate-limited API. Two payoffs: the user gets a usable product early in the run
+rather than only at the end, and a failure in `embedding` leaves a repo that is still
+searchable and browsable instead of one that is worthless.
+
+That second payoff is not hypothetical on a free tier. `embedding` **will** hit 429s on a
+large repo, which is why `chunk.embedding` is nullable and the stage selects
+`WHERE embedding IS NULL` — a retry resumes where it stopped instead of re-embedding
+everything, and a repo stuck part-way through still answers lexical search correctly.
 
 `graphing` moved ahead of `chunking`/`embedding` for the same reason — it's pure import
 resolution over data `parsing` already produced, so there's no reason for it to sit behind
@@ -89,20 +99,24 @@ On any failure: `status=failed`, store the error, surface a retry action.
 - **cloning** — `core/github`. Shallow clone where possible. Also enumerates every
   tracked file (`git ls-files` — respects `.gitignore`) and writes a `file` row per
   path with its raw `content` (or `is_binary=true` with no content), powering the
-  file tree browser independent of parsing. The `tsvector` column over `content` is a
-  Postgres *generated* column, so the lexical index maintains itself as rows are
-  written — there is no separate indexing step and no cost to this stage.
+  file tree browser independent of parsing.
 - **parsing** — `indexer`. One extractor per language (py/js/ts) via Tree-sitter.
-  Produces plain structured data → files + `code_entity` rows (the symbol table).
-- **graphing** — `indexer`. Resolve each import to a target file; write edges. Powers
-  `list_dependencies` for the agent now, and the V2 architecture view later. Pure
-  in-memory resolution over `parsing` output — fast, no I/O beyond the DB write.
+  Produces plain structured data → `code_entity` rows (the symbol table), import
+  specifiers, and — from M7 — call sites. Note the call-site pass has to descend *into*
+  function bodies, which the symbol-table walk deliberately does not.
+- **graphing** — `indexer`. Resolve imports to target files (`dependency_edge`) and callee
+  names to target entities (`reference_edge`). Powers `list_dependencies`, `get_callers`,
+  the M7 graph leg, the M8 repo map, and the V2 architecture view. Pure in-memory
+  resolution over `parsing` output — fast, no I/O beyond the DB write.
 - **chunking** — `indexer`. Chunk by AST node; each chunk keeps file, line range, and
-  owning entity, and carries a context prefix (path › class › signature) for embedding.
-  See `RETRIEVAL.md` — both rules are non-negotiable.
-- **embedding** — `core/ai`, OpenAI `text-embedding-3-small` (1536 dims). Batched to
-  control cost and stay inside rate limits. Cache by file `content_hash` so re-indexing
-  unchanged files is cheap. The only stage that spends money per run.
+  owning entity, and carries a context prefix (path › class › signature). `content_tsv` is
+  a Postgres *generated* column over `embed_text`, so the lexical index maintains itself as
+  rows are written — no separate indexing step, no cost to this stage. See `RETRIEVAL.md`
+  — both chunking rules are non-negotiable.
+- **embedding** — `core/ai`, `gemini-embedding-001` at 1536 dims, `task_type=RETRIEVAL_DOCUMENT`.
+  Batched, rate-limited, and 429-backed-off for the free tier. Resumable via
+  `WHERE embedding IS NULL`. Skip by file `content_hash` so re-indexing unchanged files
+  costs nothing. The only network-bound stage.
 - **metrics** — pure aggregation over already-extracted data; cheap to recompute.
   V1 keeps this basic — counts, languages, largest files. No dead-code/complexity/etc.
 

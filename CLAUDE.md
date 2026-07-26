@@ -55,34 +55,21 @@ finish an area, finish it cleanly: no dead code, stubs, or half-wired leftovers.
 
 GitHub OAuth login (required before any import) · repo import — public URL (plain clone) or private repo (clone with the user's decrypted token) · background indexing
 pipeline (clone+lexical index → parse+symbols → graph → chunk → embed → metrics) ·
-**hybrid retrieval** (lexical + semantic, RRF-fused) · a **retrieval eval
-set** that keeps that hybrid honest · streamed LangGraph chat agent with citations ·
+**agentic RAG**: three retrieval legs (lexical + semantic, RRF-fused, plus graph
+traversal) driven by an agent that picks its own strategy per query · a **retrieval eval
+set** that keeps all three honest · streamed LangGraph chat agent with citations ·
 hybrid search · basic dashboard (files, functions, LOC, language breakdown, largest files).
 
-That arrow chain is the **pipeline order** — what happens during a single indexing run of
-one repo, every time. Don't confuse it with the **build order** below, which is the
-sequence in which the code gets written over the life of the project. They're separate
-decisions that happen to follow the same principle: *cheap and deterministic first, slow
-and expensive last.*
-
-In the pipeline, that means the lexical index, symbol table, and import graph all finish
-before chunking and embedding start — so a repo becomes searchable minutes into indexing
-rather than only when the slowest stage completes.
+That arrow chain is the **pipeline order** (one indexing run) — not the **build order**
+(`docs/BUILD_ORDER.md`). Both follow the same principle: *cheap and deterministic first,
+slow and expensive last.*
 
 **Languages at launch:** Python, JavaScript, TypeScript. Nothing else.
 
 **Deferred to V2 (leave clean extension points, don't build):** security scanner,
-architecture graph viz (React Flow), AI code/PR review, advanced metrics, call-graph
-extraction (`find_references`/`find_callers` — build only if the M6 agent demonstrably
-needs it, see `docs/RETRIEVAL.md`).
-
-## Stack
-
-React + TS + Tailwind + Monaco + TanStack Query · FastAPI + Pydantic v2 + SQLAlchemy ·
-Celery + Redis · Postgres + pgvector · Tree-sitter · **OpenAI API for chat + embeddings**
-(`text-embedding-3-small`, 1536 dims). Both **must stay behind one interface in `core/ai`**
-so the provider is swappable — nothing outside `core/ai` imports the OpenAI SDK.
-Docker Compose local, GitHub Actions CI, AWS deploy (`docs/DEPLOYMENT.md`).
+architecture graph viz (React Flow), AI code/PR review, advanced metrics, reranking (no
+free Gemini reranker exists — see `docs/RETRIEVAL.md`), more languages. Call-graph
+extraction is **no longer** deferred; it's M7.
 
 ## Module boundaries (respect these when adding code)
 
@@ -97,58 +84,8 @@ Structure is already built — read the real tree from the repo. What matters is
   **No DB, no HTTP** — stays unit-testable in isolation.
 
 **Rules:** `api` and `worker` import `core` and `indexer`; `indexer` imports neither.
-Retrieval lives **only** in `core/retrieval`.
-
-## Build order (each milestone runs end-to-end before the next)
-
-**Ordering principle: build retrievers in cost order — cheap first, measure, then buy the
-expensive one.** Lexical search is cheap to build and cheap to throw away. Embeddings are
-neither: changing the chunking strategy means re-embedding the whole corpus, and that
-strategy is exactly what tends to change after first contact with real failing queries.
-So the eval set and the citation UI land *before* pgvector, and semantic retrieval has to
-earn its slot by moving `recall@k` on questions the cheap retrievers demonstrably fail.
-
-This works because `file.content` is already persisted at clone time (M3). A Postgres
-`tsvector` index over it is one migration and zero pipeline cost, which is enough
-retrieval to build the agent and the whole citation path against.
-
-Progress is logged in `docs/LEARNING_LOG.md`. **Done: M1 Skeleton, M2 Auth, M3 Import +
-clone, M4 Parse + extract, M5 Eval + hybrid search. Next up: M6.**
-
-4. ~~Parse + extract (Tree-sitter py/js/ts → files + entities = the symbol table), plus the
-   two things that ride along free with it: the **lexical index** (`tsvector` + `pg_trgm`)
-   and the **dependency graph** (resolve the imports the parser already extracted). No AI
-   calls in this milestone at all.~~ **Done.**
-5. ~~**Eval harness** (~40 questions with known answer locations → `recall@k`) + search
-   endpoint & UI over lexical + structural. First end-to-end `file:line` citations, and
-   the scoreboard every later retrieval change is judged against.~~ **Done** — 46 questions,
-   line-level `recall@5` 0.76 / `recall@20` 0.81. **AST chunking was pulled forward from M7
-   into this milestone** (it earns its place through exact citations and smaller agent
-   payloads, independently of embeddings — and it is a prerequisite for them anyway), so
-   the pipeline now runs `cloning → parsing → graphing → chunking`. **Structural retrieval
-   was subsequently removed** after an ablation against this same eval set showed it moving
-   recall@5 by only +0.04, concentrated in one edge case — see `docs/RETRIEVAL.md`'s
-   decision record. `search()` is lexical-only now.
-6. Chat agent (LangGraph: `code_search`, `read_file`, `list_dependencies`; multi-step loop,
-   streamed, cited) — ship-quality MVP. All three tools have real data behind them by now.
-   The agent is oriented by a **repo map** — a PageRank-ranked, AI-free "table of contents"
-   (top symbols per file, ranked by import-graph centrality) built from `code_entity` +
-   `dependency_edge` and placed in the stable prompt prefix, so the agent's first move is
-   informed instead of a blind keyword guess. See `RETRIEVAL.md`.
-7. **(Conditional)** Embeddings over the existing chunks (→ pgvector) + the semantic leg and
-   reranking — built **only if** the M5 eval set shows the cheap lexical + agent + repo-map
-   stack actually failing questions that embeddings would fix. Chunking already shipped in
-   M5, so what remains here is purely the embedding leg. Entered with a measured baseline
-   and a known list of failures; if the baseline already clears the bar, this milestone may
-   never be built. **No retriever joins the fusion without a `recall@k` movement that
-   justifies it** — the same rule that got structural retrieval cut in M5. *Current
-   evidence against it: only 2 of 46 eval questions fail to surface the correct file at
-   all.*
-8. Basic metrics + dashboard
-
-Milestone 7 is where the old plan's steps 5–6 went, and the old "chat v1 single-shot RAG
-then chat v2 agent" split collapsed into milestone 6 — see `docs/FEATURES.md` §4 for why
-shipping the agent directly is the smaller piece of work, not the larger one.
+Retrieval lives **only** in `core/retrieval`. The AI SDK is imported **only** in `core/ai` —
+no exceptions, that seam is the entire cost of swapping providers later.
 
 ## Conventions
 
@@ -156,10 +93,8 @@ shipping the agent directly is the smaller piece of work, not the larger one.
   Pydantic at the boundary.
 - Anything touching a repo is a Celery task in `worker` — never inline in `api`.
 - Status is first-class: `queued → cloning → parsing → graphing → chunking → embedding →
-  metrics → ready | failed`, surfaced to the UI. (Same set of states as before; `graphing`
-  moved ahead of `chunking`/`embedding` to match the pipeline order above. The
-  `RepositoryStatus` enum in `core/models.py` already holds every value — only the order
-  the worker advances through them changes.)
+  metrics → ready | failed`, surfaced to the UI. `RepositoryStatus` in `core/models.py`
+  already holds every value.
 - Secrets via env only; keep `.env.example` current.
 - Everything scoped by `repository_id`; ownership checked on every read.
 
@@ -167,7 +102,9 @@ shipping the agent directly is the smaller piece of work, not the larger one.
 
 | File | Contents |
 |------|----------|
-| `docs/RETRIEVAL.md` | **Read first.** Hybrid retrieval design — the core engineering |
+| `docs/RETRIEVAL.md` | **Read first.** Agentic RAG design — the core engineering |
+| `docs/BUILD_ORDER.md` | Milestones, current status, ordering rationale — **read before starting a milestone** |
+| `docs/STACK.md` | Every library and provider, and why each was chosen |
 | `docs/ARCHITECTURE.md` | Components, data flow, service responsibilities |
 | `docs/WORKFLOW.md` | User journey + indexing pipeline, step by step |
 | `docs/DATA_MODEL.md` | Database schema and core entities |

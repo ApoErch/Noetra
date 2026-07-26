@@ -9,7 +9,9 @@ host during dev — choose per component.
 - Python 3.11+ with `uv`  — backend
 - Node 20+ with pnpm — frontend
 - A GitHub OAuth app (Client ID + Secret)
-- An OpenAI API key — used for both chat and embeddings
+- A Google Gemini API key — used for both chat and embeddings. Free tier is enough;
+  get one at <https://aistudio.google.com/apikey>. Note the free-tier limits (roughly
+  10 RPM / 250 RPD on `gemini-2.5-flash`) — they're low enough to shape how you test.
 
 ## Services (docker-compose)
 
@@ -41,13 +43,16 @@ GITHUB_CLIENT_SECRET=
 GITHUB_OAUTH_CALLBACK=http://localhost:8000/api/v1/auth/callback
 FRONTEND_URL=http://localhost:5173
 # ai — one provider, both uses; read only by core/ai
-OPENAI_API_KEY=
-OPENAI_CHAT_MODEL=
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small   # 1536 dims — must match chunk.embedding
+GEMINI_API_KEY=
+GEMINI_CHAT_MODEL=gemini-2.5-flash
+GEMINI_EMBEDDING_MODEL=gemini-embedding-001
+GEMINI_EMBEDDING_DIMENSIONS=1536   # must match chunk.embedding's vector(N); changing it = full re-embed
 # app
 SESSION_SECRET=
 TOKEN_ENCRYPTION_KEY=          # Fernet key: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 CLONE_STORAGE_DIR=/data/repos  # where the worker clones repos
+# eval harness — a GitHub token that can read the private noetra repo (public eval repos need no auth)
+EVAL_GITHUB_TOKEN=
 ```
 
 ## First run
@@ -79,7 +84,18 @@ docker compose logs -f worker          # watch the indexing pipeline
 docker compose exec api alembic revision --autogenerate -m "msg"
 docker compose exec db psql -U noetra   # inspect the DB
 docker compose down -v                  # reset everything (drops volumes)
+
+# retrieval eval (the scoreboard — see RETRIEVAL.md)
+docker compose exec worker python -m eval.seed           # clone + index the 3 pinned repos
+docker compose exec worker python -m eval.seed --force   # re-seed; MANDATORY after any
+                                                         # chunker or embedding change
+docker compose exec worker python -m eval.run            # recall@5 / recall@20 scoreboard
 ```
+
+The eval runs in `worker`, not `api` — it needs `git`, the DB, and the `.env` file, and
+`worker` is the only service with all three. Chunks and embeddings are built at *index*
+time, not query time, so changing how either works means re-seeding before the numbers mean
+anything.
 
 ## Notes
 

@@ -21,8 +21,10 @@
                                                │
                               ┌────────────────┼────────────────┐
                               ▼                ▼                ▼
-                         Tree-sitter        OpenAI API       Git / GitHub API
-                         (parse+chunk)    (chat / embed)     (clone / metadata)
+                         Tree-sitter       Gemini API       Git / GitHub API
+                         (parse+chunk)   (chat / embed)     (clone / metadata)
+                                        gemini-2.5-flash
+                                        gemini-embedding-001
 ```
 
 ## Components
@@ -32,15 +34,20 @@ viewer. Watches repository status while indexing runs.
 
 **api** — FastAPI. Stateless request layer: auth, repo CRUD, serves indexed data, runs
 the `/search` endpoint via `core/retrieval`, and hosts the **LangGraph agent** for chat
-(streamed). Enqueues indexing jobs; never does heavy work inline.
+(streamed over SSE). Enqueues indexing jobs; never does heavy work inline.
 
-**worker** — Celery. Owns the indexing pipeline (`WORKFLOW.md`): clone, parse, chunk,
-embed, build symbol table + dependency edges, compute basic metrics. Long-running,
-horizontally scalable.
+The agent living in `api` rather than `worker` is deliberate: a chat turn is
+**interactive** (the user is watching tokens stream) while everything in `worker` is
+**batch** (nobody is waiting on a specific clone). Putting the agent behind a Celery queue
+would mean polling for an answer that should be streaming. The "no slow work in `api`" rule
+is really "no *repo-touching* work in `api`" — the agent only reads the DB.
+
+**worker** — Celery. Owns the indexing pipeline (`WORKFLOW.md`): clone, parse, graph,
+chunk, embed, compute basic metrics. Long-running, horizontally scalable.
 
 **PostgreSQL (+ pgvector)** — single source of truth: users, repositories, files,
-code entities (symbol table), chunks + embeddings, dependency edges, metrics. pgvector
-keeps embeddings in the same DB — no second datastore in V1.
+code entities (symbol table), chunks + embeddings, dependency + reference edges, metrics.
+pgvector keeps embeddings in the same DB — no second datastore in V1.
 
 **Redis** — Celery broker + task status/progress. Optional cache for dashboard reads.
 
@@ -48,17 +55,21 @@ keeps embeddings in the same DB — no second datastore in V1.
 
 - `core/db` — SQLAlchemy models + session.
 - `core/github` — the only place that talks to git/GitHub.
-- `core/ai` — the only place that calls OpenAI (chat completions **and** embeddings).
-  Nothing outside this module imports the `openai` package. Two narrow interfaces —
-  "generate a streamed completion given messages + tools" and "embed these strings" —
-  which is the entire cost of switching providers later. Retrieval quality depends on the
-  embedding model, so this seam is worth keeping honest even though V1 has no second
-  provider.
-- `core/retrieval` — the hybrid retriever (`RETRIEVAL.md`). Used by both the search
-  endpoint and the agent tools.
-- `core/agent` — the LangGraph graph + tool definitions.
-- `indexer` — Tree-sitter parsing, AST chunking, symbol extraction, dependency graph.
-  Pure logic: no DB, no HTTP, unit-testable in isolation.
+- `core/ai` — the only place that calls Gemini (chat **and** embeddings). Nothing outside
+  this module imports the Gemini SDK. Two narrow interfaces — "generate a streamed
+  completion given messages + tools" and "embed these strings" — which is the entire cost
+  of switching providers later. This seam is worth keeping honest even with one provider,
+  because retrieval quality depends on the embedding model.
+  It also owns everything provider-shaped that would otherwise leak outward: batching, the
+  `task_type` split (`RETRIEVAL_DOCUMENT` when indexing, `CODE_RETRIEVAL_QUERY` when
+  querying), truncation to the model's 2048-token input cap, client-side L2 normalization,
+  and free-tier rate limiting with 429 backoff.
+- `core/retrieval` — the three retrieval legs + RRF fusion (`RETRIEVAL.md`). Used by both
+  the search endpoint and the agent tools. No retrieval logic lives anywhere else.
+- `core/agent` — the hand-rolled LangGraph `StateGraph`, the tool definitions, and the
+  repo map.
+- `indexer` — Tree-sitter parsing, AST chunking, symbol extraction, import + call graph
+  resolution. Pure logic: no DB, no HTTP, unit-testable in isolation.
 
 ## Data flow
 
@@ -68,12 +79,13 @@ keeps embeddings in the same DB — no second datastore in V1.
 - **Indexing:** worker consumes the job, advances status per stage, writes results,
   sets `ready` (or `failed` + error).
 - **Chat:** web → api → LangGraph agent → agent calls retrieval tools in a loop →
-  OpenAI → streamed answer with `file:line` citations → web.
+  Gemini → streamed answer with `file:line` citations → web. Tool-call status streams
+  alongside tokens, so a multi-second loop reads as alive rather than hung.
 
 ## Boundaries / rules
 
 - The request cycle never clones, parses, or embeds — always a Celery task.
-- All OpenAI calls (chat + embeddings) go through `core/ai`.
+- All Gemini calls (chat + embeddings) go through `core/ai`.
 - All git/GitHub access goes through `core/github`.
 - All retrieval goes through `core/retrieval`.
 - `indexer` stays pure (no side effects) for testability.
