@@ -174,6 +174,6 @@ def search_repository(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[RetrievalHit]:
-    """Hybrid lexical + structural search over an indexed repo, returning RRF-ranked file:line hits."""
+    """Lexical search over an indexed repo, returning ranked file:line hits."""
     repo = _get_owned_repository(repository_id, user, db)
     return search(db, repo.id, q, limit=20)

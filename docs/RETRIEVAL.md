@@ -1,24 +1,42 @@
 # Retrieval (the core)
 
 Pure vector search over code gives weak, hand-wavy answers. Noetra uses **hybrid
-retrieval**: three retrievers that answer different kinds of question, fused into one
-ranked result set. This is the most important part of the product — the agent is only
-as good as what this returns.
+retrieval**: retrievers that answer different kinds of question, fused into one ranked
+result set. This is the most important part of the product — the agent is only as good
+as what this returns.
 
-## The three retrievers
+## Decision record: structural retrieval was built, measured, and cut
+
+M5 originally shipped **three** retrievers: lexical, structural (trigram lookup over
+`code_entity`, `structural_search()`), and semantic (conditional, M7). Once the eval
+harness existed, we ran the ablation the harness exists to enable: ran the 46-question
+eval with and without structural in the fusion. Result — pulling structural out dropped
+`symbol`-bucket recall@5 from 1.00 to 0.93, and overall recall@5 from 0.76 to 0.72. Real,
+but concentrated in one case: identifiers containing characters the Postgres text-search
+tokenizer mangles (`$ZodRegistry`) or garbles the boundaries of. Everything else
+structural found, lexical already found on its own — because chunking is AST-aware, so a
+function's own definition line is usually the highest-signal chunk lexical returns for its
+name anyway.
+
+Given that, structural retrieval (`core/retrieval/structural.py`) was removed rather than
+kept for a single-question, single-repo win: one fewer query per search, one fewer thing
+to keep correct, no measured loss worth the complexity. `search()` is lexical-only until
+M7. This is the same "no retriever joins the fusion without a `recall@k` movement that
+justifies it" rule applied in the other direction — the rule cuts a retriever exactly as
+readily as it admits one, once you have the number.
+
+**What structural retrieval was not**, despite the name: it never did call-graph traversal
+("who calls `authenticate`?") — that data was never extracted at all, at any layer. See
+"Deferred: call-graph extraction" below.
+
+## The two retrievers
 
 **1. Lexical** — exact/keyword matching.
-Postgres full-text (`tsvector`) + trigram (`pg_trgm`) over file content and identifiers.
+Postgres full-text (`tsvector`) over file content and identifiers.
 Answers: exact string/identifier lookups, error messages, config keys.
 *"find every place that references `STRIPE_SECRET`."*
 
-**2. Structural (symbol table + graph)** — the code's own structure.
-Lookups over `code_entity` (definitions: functions, classes, methods) and
-`dependency_edge` (imports between files).
-Answers: definitions, and what depends on what.
-*"where is `createToken` defined?"* → exact symbol match, no embedding needed.
-
-**3. Semantic** — meaning, via embeddings.
+**2. Semantic** — meaning, via embeddings.
 pgvector similarity over **AST-aware chunks** (chunked by function/class, never fixed
 token windows). OpenAI `text-embedding-3-small` — 1536 dimensions, cheap, good enough for
 code; `-large` (3072) is the upgrade path if evals justify it. OpenAI's `dimensions`
@@ -29,7 +47,7 @@ Answers: conceptual, fuzzy questions where the words don't match the code.
 This is the only retriever that earns its keep on questions where the user's words appear
 nowhere in the codebase — which is a real and important class, but a **minority** of code
 questions. Most of the time the identifier you want is literally in the file, which is why
-the two retrievers above carry more weight than vector-search-first intuition suggests.
+lexical above carries more weight than vector-search-first intuition suggests.
 
 ## Chunking rule (non-negotiable)
 
@@ -61,8 +79,8 @@ single deduplicated, ranked list where each result knows its `file`, `line range
 source retriever(s).
 
 Cheap routing before fusion: if the query looks like a bare symbol (`createToken`,
-`UserService`), weight structural + lexical; if it's a natural-language question, weight
-semantic. When unsure, run all three — RRF handles the merge.
+`UserService`), weight lexical; if it's a natural-language question, weight semantic.
+When unsure, run both — RRF handles the merge.
 
 **Then rerank.** RRF is good at *merging* rankings but knows nothing about the query's
 meaning — it only sees positions. So fuse wide and cut narrow: take the top ~30 fused
@@ -76,8 +94,8 @@ Retrieval sits directly in the user's perceived response time, so treat these as
 constraints, not optimizations to do later:
 
 - **Route before you embed.** A bare-identifier query (`^[A-Za-z_]\w*$`) resolves through
-  the symbol table in ~10 ms. Sending it through an embedding API call first adds ~100 ms
-  for a worse answer. Skip the call entirely.
+  lexical's exact-match path in ~10 ms. Sending it through an embedding API call first
+  adds ~100 ms for a worse answer. Skip the call entirely.
 - **Keep the prompt prefix stable.** System prompt → tool definitions → repo map, in that
   order and byte-identical across every question about a repo. OpenAI caches long prompt
   prefixes automatically, so this costs nothing to arrange and pays on every follow-up
@@ -93,7 +111,6 @@ constraints, not optimizations to do later:
 The retriever is exposed to the agent as **tools**, not a single pre-baked context blob:
 
 - `code_search(query)` → hybrid retrieval, ranked snippets with citations
-- `find_symbol(name)` → structural definition lookup
 - `read_file(path, start?, end?)` → exact source for a location
 - `list_dependencies(path)` → what a file imports / what imports it
 
@@ -140,32 +157,45 @@ immediately after. Ship the agent.
 
 ## Build order & measurement
 
-The three retrievers do not get built at once, and they do not get built in the order
-they're listed above. **Build them in cost order — cheap first, measure, then buy the
-expensive one.**
+The retrievers do not get built at once. **Build them in cost order — cheap first,
+measure, then buy the expensive one.**
 
 | | Build cost | Cost to redo | Ships in |
 |---|---|---|---|
 | Lexical | one migration (`tsvector` over `file.content`, which clone already persists) | trivial | M4 |
-| Structural | falls out of the symbol table you're building anyway | trivial | M4 |
+| ~~Structural~~ | fell out of the symbol table being built anyway | trivial | M4 → **removed after M5 measurement** |
 | Semantic | chunking + embedding pipeline + pgvector index + tuning | **re-embed the entire corpus** | M7 (conditional) |
 
 The asymmetry in the third column is the whole argument. Chunking strategy is the thing
 most likely to change once you see real queries fail — and changing it means paying the
-expensive operation again. So the sequence is: ship lexical + structural, build the eval
-set, run the agent against it, find out *which questions actually fail and why*, and only
-then build semantic retrieval — with the tuning knobs (chunk granularity, `k`, threshold,
-whether the context prefix helps) set against evidence instead of intuition.
+expensive operation again. So the sequence is: ship lexical (+ structural, briefly — see
+the decision record above), build the eval set, run the agent against it, find out *which
+questions actually fail and why*, and only then build semantic retrieval — with the tuning
+knobs (chunk granularity, `k`, threshold, whether the context prefix helps) set against
+evidence instead of intuition.
 
-The other benefit is diagnostic. If three fused retrievers return junk, you cannot tell
+The other benefit is diagnostic. If several fused retrievers return junk, you cannot tell
 which one is at fault. Starting with one gives you a clean baseline to attribute every
-later regression against.
+later regression against — which is exactly what made the structural ablation possible.
 
-**The rule: no retriever joins the fusion without a `recall@k` movement that justifies it.**
-This makes semantic retrieval **conditional**: if lexical + structural + the agent + the
-repo map already clear the eval bar, M7 is not built at all. Embeddings have to *earn* their
-slot by moving `recall@k` on questions the cheap stack demonstrably fails — they are not a
-foregone conclusion.
+**The rule: no retriever joins the fusion without a `recall@k` movement that justifies
+it — and, symmetrically, none stays in it without one either.** This makes semantic
+retrieval **conditional**: if lexical + the agent + the repo map already clear the eval
+bar, M7 is not built at all. Embeddings have to *earn* their slot by moving `recall@k` on
+questions the cheap stack demonstrably fails — they are not a foregone conclusion.
+
+## Deferred: call-graph extraction
+
+`dependency_edge` is a **file-level import graph** ("does `a.py` import `b.py`"), not a
+call graph. Nothing in Noetra currently answers "who calls `authenticate`?" or "what
+implements `BaseAuthenticator`?" — that needs call-site and inheritance extraction in
+`indexer/parser.py` plus a new edge type, none of which exists yet.
+
+Not building it speculatively, for the same reason structural retrieval got cut above:
+no measured need yet. **Only after** M6 ships and you hit a real question the agent can't
+answer because it needs "who calls this" and neither `list_dependencies` nor semantic
+search gets there, consider call-graph extraction as its own scoped feature — built
+against evidence, like everything else in this doc.
 
 ## Evaluation
 

@@ -42,7 +42,7 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/db`. Everything scoped by
 | loc | int, nullable | lines of code; only set for parsed languages |
 | content_tsv | tsvector, generated | **powers lexical retrieval.** A Postgres *generated* column (`to_tsvector('english', coalesce(content, ''))`) with a GIN index — it maintains itself on every insert/update, so there is no indexing step to run and nothing to keep in sync. Created in the same migration as the table's M4 changes, which is what makes search work the moment cloning finishes. |
 
-### code_entity  *(the symbol table — powers structural retrieval)*
+### code_entity  *(the symbol table — powers chunking and the M6 repo map; no longer powers retrieval, see `RETRIEVAL.md`)*
 | field | type | notes |
 |-------|------|-------|
 | id | uuid (pk) | |
@@ -114,8 +114,8 @@ staging is what the build order in `CLAUDE.md` rests on.
 
 | index | purpose | milestone |
 |-------|---------|-----------|
-| GIN on `file.content_tsv` + `pg_trgm` on `code_entity.name` | lexical retrieval | **M4** — one migration, no pipeline cost |
-| `code_entity(repository_id, name)` | structural symbol lookup | **M4** |
+| GIN on `file.content_tsv` | lexical retrieval | **M4** — one migration, no pipeline cost |
+| `code_entity(repository_id, name)` | symbol lookup (chunking, M6 repo map) | **M4** |
 | `file(repository_id, content_hash)` | incremental re-index | **M4** |
 | HNSW on `chunk.embedding` | semantic retrieval | **M7** — after evals justify it |
 

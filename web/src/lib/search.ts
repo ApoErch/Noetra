@@ -7,8 +7,6 @@ export type SearchHit = {
   snippet: string
   score: number
   sources: string[]
-  entity_name: string | null
-  entity_kind: string | null
   /** Absolute file line of `snippet` — the line inside the range that actually matched. */
   match_line: number | null
 }

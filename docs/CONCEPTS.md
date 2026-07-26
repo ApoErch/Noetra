@@ -540,11 +540,16 @@ Embeddings earn their keep on exactly one class of question: where the user's wo
 says `Session`, `verify`, `cookie`. That is a real and important class. It is also a
 minority of questions.
 
-**How it's used in Noetra:** this is why the build order puts lexical + structural
-retrieval in milestones 4–5 and embeddings in milestone 7 — and why all three get fused
-rather than picking one. It is also why a query that looks like a bare identifier gets
-routed straight to the symbol table with no embedding API call at all (~10 ms instead of
-~100 ms, for a *better* answer).
+**How it's used in Noetra:** this is why the build order puts lexical retrieval in
+milestone 4 and embeddings in milestone 7 — and why they get fused rather than picking
+one. A structural retriever (trigram lookup over `code_entity`) also shipped briefly in
+M5, then got cut: an ablation against the eval set showed it moved recall@5 by only +0.04,
+concentrated in one edge case (identifiers with characters the text-search tokenizer
+mangles) — everywhere else, lexical alone already found the same chunk, because chunking
+is AST-aware so a function's own definition line is usually its highest-signal chunk
+anyway. This is also why a query that looks like a bare identifier gets routed straight to
+lexical's exact-match path with no embedding API call at all (~10 ms instead of ~100 ms,
+for a *better* answer).
 
 **Is this standard?** Increasingly yes — "agentic search" (give the model `grep` plus
 `read_file` plus symbol lookup and let it explore) has become a mainstream alternative to
@@ -964,9 +969,11 @@ matching over file content and symbol names, already indexed at the DB level (a 
 on `content_tsv`, a trigram GIN index on `code_entities.name`).
 
 **How it's used in Noetra:** `core/retrieval/lexical.py` runs
-`content_tsv @@ websearch_to_tsquery('english', :q)` ordered by `ts_rank`.
-`core/retrieval/structural.py` matches symbol names with the trigram `%` operator +
-`similarity()`. **Key choice — `websearch_to_tsquery`** (not `to_tsquery` or
+`content_tsv @@ websearch_to_tsquery('english', :q)` ordered by `ts_rank`. A trigram-based
+`structural.py` retriever also matched symbol names with the `%` operator + `similarity()`
+for a while (M5), but was removed after measurement showed it moving recall@5 by only
++0.04 — see `docs/RETRIEVAL.md`'s decision record. **Key choice — `websearch_to_tsquery`**
+(not `to_tsquery` or
 `plainto_tsquery`): it accepts raw Google-style user input (`auth OR "session cookie"`)
 and *never raises* on junk, whereas `to_tsquery` 500s on a stray space. That safety is why
 it's the right pick for a user-facing search box.
@@ -988,18 +995,20 @@ lists of 1/(k + rank)`, with `k` a dampening constant (60 is the standard from t
 original paper). An item ranked #1 in a list contributes `1/61`; #2 contributes `1/62`;
 items that rank well in *several* lists rise to the top.
 
-**Why we need it here:** we have two (later three) retrievers whose scores aren't
-comparable — `ts_rank` (a full-text relevance float) and trigram `similarity` (0–1) live
-on totally different scales. Averaging them would be meaningless. RRF sidesteps the problem
-by throwing away the scores and using only rank order.
+**Why we need it here:** retrievers' scores aren't comparable — `ts_rank` (a full-text
+relevance float) and a semantic retriever's cosine similarity (0–1) would live on totally
+different scales. Averaging them would be meaningless. RRF sidesteps the problem by
+throwing away the scores and using only rank order.
 
-**How it's used in Noetra:** `core/retrieval/fusion.py::reciprocal_rank_fusion` takes the
-lexical + structural ranked lists, keys each hit by its code location, sums `1/(k+rank)`,
-unions the source retrievers on duplicates, and returns the top hits. Adding the M7
-semantic leg is just one more list in the input — no other code changes. (Current
-limitation: it dedupes by *exact* line range, so the same location surfaced with slightly
-different ranges by two retrievers isn't merged yet — deferred until the eval shows it
-matters.)
+**How it's used in Noetra:** `core/retrieval/fusion.py::reciprocal_rank_fusion` merges
+ranked lists, keys each hit by its code location, sums `1/(k+rank)`, unions the source
+retrievers on duplicates, and returns the top hits. It briefly fused lexical + a
+structural (trigram) retriever in M5, then went dormant — the structural leg was cut after
+an ablation showed it moving recall@5 by only +0.04 (see `docs/RETRIEVAL.md`), and one
+list alone needs no fusion. It's wired back in — just one more list in the input, no other
+code changes — once the M7 semantic leg ships. (Current limitation: it dedupes by *exact*
+line range, so the same location surfaced with slightly different ranges by two
+retrievers isn't merged yet — deferred until the eval shows it matters.)
 
 **Is this standard?** Yes — RRF is the go-to fusion method for hybrid search (keyword +
 vector); popular precisely because it's robust and needs zero score calibration.

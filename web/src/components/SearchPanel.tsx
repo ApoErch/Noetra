@@ -83,22 +83,11 @@ function SearchResult({ hit, onOpen }: { hit: SearchHit; onOpen: () => void }) {
     >
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-xs text-indigo-400">{formatCitation(hit)}</span>
-        {hit.entity_name && (
-          <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-300">
-            {hit.entity_kind} {hit.entity_name}
-          </span>
-        )}
         <span className="ml-auto flex gap-1">
           {hit.sources.map((source) => (
             <span
               key={source}
-              // Which retriever found it — worth surfacing, since a hit both retrievers
-              // agree on is the strongest signal the fusion produces.
-              className={`rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${
-                source === 'structural'
-                  ? 'bg-violet-500/10 text-violet-400 ring-1 ring-violet-500/20'
-                  : 'bg-sky-500/10 text-sky-400 ring-1 ring-sky-500/20'
-              }`}
+              className="rounded bg-sky-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-sky-400 ring-1 ring-sky-500/20"
             >
               {source}
             </span>

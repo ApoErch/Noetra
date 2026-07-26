@@ -17,9 +17,13 @@ def reciprocal_rank_fusion(
 ) -> list[RetrievalHit]:
     """Merge ranked lists by Reciprocal Rank Fusion: score = sum of 1/(k + rank).
 
-    RRF uses each hit's *rank position*, never the retrievers' raw scores — so lexical's
-    ts_rank and structural's trigram similarity never have to be put on a common scale.
+    RRF uses each hit's *rank position*, never the retrievers' raw scores — so two
+    retrievers whose scores live on different scales (e.g. lexical's `ts_rank` vs a future
+    semantic leg's cosine similarity) never have to be put on a common scale.
     A location that ranks well in several lists rises; dedup unions the source retrievers.
+
+    Currently unused — retrieval is lexical-only (see core/retrieval/__init__.py). Wired
+    back in once the M7 semantic leg ships.
     """
     scores: dict[_Key, float] = defaultdict(float)
     merged: dict[_Key, RetrievalHit] = {}
@@ -36,11 +40,7 @@ def reciprocal_rank_fusion(
             for source in hit.sources:
                 if source not in existing.sources:
                     existing.sources.append(source)
-            if existing.entity_name is None and hit.entity_name is not None:
-                existing.entity_name = hit.entity_name
-                existing.entity_kind = hit.entity_kind
-            # Structural hits carry no match_line (they match on a name, not on body text),
-            # so keep whichever retriever did work one out.
+            # Keep whichever retriever's hit actually resolved a match_line, if either did.
             if existing.match_line is None and hit.match_line is not None:
                 existing.match_line = hit.match_line
                 existing.snippet = hit.snippet

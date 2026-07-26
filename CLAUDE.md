@@ -55,7 +55,7 @@ finish an area, finish it cleanly: no dead code, stubs, or half-wired leftovers.
 
 GitHub OAuth login (required before any import) · repo import — public URL (plain clone) or private repo (clone with the user's decrypted token) · background indexing
 pipeline (clone+lexical index → parse+symbols → graph → chunk → embed → metrics) ·
-**hybrid retrieval** (lexical + structural + semantic, RRF-fused) · a **retrieval eval
+**hybrid retrieval** (lexical + semantic, RRF-fused) · a **retrieval eval
 set** that keeps that hybrid honest · streamed LangGraph chat agent with citations ·
 hybrid search · basic dashboard (files, functions, LOC, language breakdown, largest files).
 
@@ -72,7 +72,9 @@ rather than only when the slowest stage completes.
 **Languages at launch:** Python, JavaScript, TypeScript. Nothing else.
 
 **Deferred to V2 (leave clean extension points, don't build):** security scanner,
-architecture graph viz (React Flow), AI code/PR review, advanced metrics.
+architecture graph viz (React Flow), AI code/PR review, advanced metrics, call-graph
+extraction (`find_references`/`find_callers` — build only if the M6 agent demonstrably
+needs it, see `docs/RETRIEVAL.md`).
 
 ## Stack
 
@@ -110,27 +112,38 @@ This works because `file.content` is already persisted at clone time (M3). A Pos
 `tsvector` index over it is one migration and zero pipeline cost, which is enough
 retrieval to build the agent and the whole citation path against.
 
-Progress is logged in `docs/LEARNING_LOG.md`. **Done: M1 Skeleton, M2 Auth.**
-**Done M3. Import + clone (enqueue Celery job, clone, persist `Repository` + status)**
-4. Parse + extract (Tree-sitter py/js/ts → files + entities = the symbol table), plus the
+Progress is logged in `docs/LEARNING_LOG.md`. **Done: M1 Skeleton, M2 Auth, M3 Import +
+clone, M4 Parse + extract, M5 Eval + hybrid search. Next up: M6.**
+
+4. ~~Parse + extract (Tree-sitter py/js/ts → files + entities = the symbol table), plus the
    two things that ride along free with it: the **lexical index** (`tsvector` + `pg_trgm`)
    and the **dependency graph** (resolve the imports the parser already extracted). No AI
-   calls in this milestone at all.
-5. **Eval harness** (~40 questions with known answer locations → `recall@k`) + search
+   calls in this milestone at all.~~ **Done.**
+5. ~~**Eval harness** (~40 questions with known answer locations → `recall@k`) + search
    endpoint & UI over lexical + structural. First end-to-end `file:line` citations, and
-   the scoreboard every later retrieval change is judged against.
-6. Chat agent (LangGraph: `code_search`, `find_symbol`, `read_file`, `list_dependencies`;
-   multi-step loop, streamed, cited) — ship-quality MVP. All four tools have real data
-   behind them by now. The agent is oriented by a **repo map** — a PageRank-ranked, AI-free
-   "table of contents" (top symbols per file, ranked by import-graph centrality) built from
-   `code_entity` + `dependency_edge` and placed in the stable prompt prefix, so the agent's
-   first move is informed instead of a blind keyword guess. See `RETRIEVAL.md`.
-7. **(Conditional)** AST chunking + embeddings (chunk by function/class → pgvector) + the
-   semantic leg and reranking — built **only if** the M5 eval set shows the cheap
-   lexical + structural + agent + repo-map stack actually failing questions that embeddings
-   would fix. Entered with a measured baseline and a known list of failures; if the baseline
-   already clears the bar, this milestone may never be built. **No retriever joins the
-   fusion without a `recall@k` movement that justifies it.**
+   the scoreboard every later retrieval change is judged against.~~ **Done** — 46 questions,
+   line-level `recall@5` 0.76 / `recall@20` 0.81. **AST chunking was pulled forward from M7
+   into this milestone** (it earns its place through exact citations and smaller agent
+   payloads, independently of embeddings — and it is a prerequisite for them anyway), so
+   the pipeline now runs `cloning → parsing → graphing → chunking`. **Structural retrieval
+   was subsequently removed** after an ablation against this same eval set showed it moving
+   recall@5 by only +0.04, concentrated in one edge case — see `docs/RETRIEVAL.md`'s
+   decision record. `search()` is lexical-only now.
+6. Chat agent (LangGraph: `code_search`, `read_file`, `list_dependencies`; multi-step loop,
+   streamed, cited) — ship-quality MVP. All three tools have real data behind them by now.
+   The agent is oriented by a **repo map** — a PageRank-ranked, AI-free "table of contents"
+   (top symbols per file, ranked by import-graph centrality) built from `code_entity` +
+   `dependency_edge` and placed in the stable prompt prefix, so the agent's first move is
+   informed instead of a blind keyword guess. See `RETRIEVAL.md`.
+7. **(Conditional)** Embeddings over the existing chunks (→ pgvector) + the semantic leg and
+   reranking — built **only if** the M5 eval set shows the cheap lexical + agent + repo-map
+   stack actually failing questions that embeddings would fix. Chunking already shipped in
+   M5, so what remains here is purely the embedding leg. Entered with a measured baseline
+   and a known list of failures; if the baseline already clears the bar, this milestone may
+   never be built. **No retriever joins the fusion without a `recall@k` movement that
+   justifies it** — the same rule that got structural retrieval cut in M5. *Current
+   evidence against it: only 2 of 46 eval questions fail to surface the correct file at
+   all.*
 8. Basic metrics + dashboard
 
 Milestone 7 is where the old plan's steps 5–6 went, and the old "chat v1 single-shot RAG

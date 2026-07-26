@@ -42,14 +42,15 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
 
 ## 5. Hybrid search
 - Replaces manual Ctrl+Shift+F. "where do we send emails?", "where is `createToken` defined?"
-- Hybrid retrieval: lexical + structural + semantic, RRF-fused, then reranked
-  (`RETRIEVAL.md`).
+- Hybrid retrieval: lexical + semantic, RRF-fused, then reranked (`RETRIEVAL.md`).
 - Ranked results with `file:line` + one-line context. Click → open in Monaco at that line.
-- Build note: ships in milestone 5 with **lexical + structural only** and *may* gain the
-  semantic leg in milestone 7 — only if the eval set justifies it (see `RETRIEVAL.md`). The
-  endpoint contract and the UI don't change either way — only what's behind `core/retrieval`
-  does. Shipping it early is what proves the citation path end-to-end and gives the eval
-  harness something to measure.
+- Build note: shipped in milestone 5 with **lexical + structural**, then structural was
+  removed after an eval-driven ablation showed it moving recall@5 by only +0.04 — see
+  `RETRIEVAL.md`'s decision record. It's **lexical-only** now, and *may* gain the semantic
+  leg in milestone 7 — only if the eval set justifies it (see `RETRIEVAL.md`). The endpoint
+  contract and the UI don't change either way — only what's behind `core/retrieval` does.
+  Shipping it early is what proves the citation path end-to-end and gives the eval harness
+  something to measure.
 - Lexical results are available as soon as `status` passes `cloning`, the same as the file
   tree; symbol lookup needs `parsing`; the semantic leg (if built) needs `ready`.
 
