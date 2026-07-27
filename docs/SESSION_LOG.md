@@ -243,3 +243,103 @@ Most recent entry last. Written by `/endsession`.
 - **The eval feeds raw English to `search()`; the M6 agent never will** — it will reformulate first. So the conceptual bucket is realistic for the search UI and pessimistic for the agent path. When M6 lands, extend `run.py` to score agent-mediated retrieval alongside raw `search()`.
 - `_MAX_CHUNKS_PER_FILE = 2` and `_NON_SOURCE_RANK_FACTOR = 0.3` are untuned first guesses that happened to work; both are single-constant knobs the eval can settle.
 - Re-seeding after any chunker change is mandatory (`docker compose exec worker python -m eval.seed --force`) — chunks are built at index time, not query time.
+
+---
+
+## Session — 2026-07-26 16:59
+
+**Worked on:** Q&A on how lexical/structural retrieval and chunking actually work, which led to measuring and then removing structural retrieval from the fusion.
+**Done:**
+- Walked lexical search (query relaxation, per-file cap, non-source penalty), structural search (exact + trigram-fuzzy `code_entity` lookup), RRF fusion, and AST chunking with concrete examples from the real code.
+- Clarified a real gap the user's mental model assumed existed: there is **no call-graph** anywhere in the codebase — `dependency_edge` is file-level import resolution only, not "who calls this function." No inheritance data either (`CodeEntity` has no base-class field).
+- Ran the actual ablation the eval harness exists to enable: brought up `docker compose`, seeded the 3 eval repos (already seeded from a prior session), ran `eval.run` with structural search stubbed out of `core/retrieval/search()` vs. left in. **Hybrid: recall@5 0.76 / @20 0.83. Lexical-only: recall@5 0.72 / @20 0.78.** The one symbol question that flips is `$ZodRegistry` — a `$`-prefixed identifier the Postgres text-search tokenizer mangles; trigram similarity doesn't care about `$`, so structural still found it.
+- Discussed (and rejected, unmeasured) a call-graph-seeded RRF pattern the user found elsewhere — seeding a "structural" retriever's graph expansion from the top semantic/lexical hit. Rejected because: (a) it needs call-graph extraction Noetra doesn't have, (b) it targets the wrong failure bucket (the actual weak spot is `conceptual`, which is M7's job, not graph traversal), (c) it couples retrievers together (seeding from a wrong top hit reinforces the mistake) where the current independent-retriever-then-RRF design deliberately keeps errors uncorrelated.
+- **Decision: strip structural retrieval entirely**, given a +0.04 recall@5 win didn't justify the complexity for this project's scale. Deleted `core/retrieval/structural.py`; simplified `search()` to lexical-only; cleaned `RetrievalHit`/`RetrieverSource`/`fusion.py` of now-dead `entity_name`/`entity_kind`/`STRUCTURAL` fields; updated frontend (`search.ts`, `SearchPanel.tsx`) to match; wrote and applied migration `7a96b345a5d0` dropping the now-unused `ix_code_entities_name_trgm` pg_trgm index (verified gone via `pg_indexes`); updated `CLAUDE.md`, `docs/RETRIEVAL.md` (added a decision record + a "Deferred: call-graph extraction" section), `docs/FEATURES.md`, `docs/DATA_MODEL.md`, `docs/CONCEPTS.md` to match. Re-ran the eval post-removal to confirm it reproduces the lexical-only ablation numbers exactly. Committed as `24e3e88`.
+**In progress:** Nothing code-wise — this was a complete, scoped removal, verified end-to-end. M5's search UI is still the open item from the prior session (not touched this session).
+**Key decisions:**
+- **Cut structural retrieval, not just documented the tradeoff** — the project's own rule ("no retriever joins the fusion without a `recall@k` movement that justifies it") cuts both ways; a measured, marginal, single-edge-case win wasn't enough to keep it.
+- **Removed the planned `find_symbol` agent tool from `docs/RETRIEVAL.md`'s M6 tool list** — it was structural's agent-facing form; `code_search` (lexical) already covers the same ground per the eval.
+- **Call-graph extraction stays deferred, not built** — no measured need yet; added as a concrete, evidence-gated V2 item in `CLAUDE.md` rather than left as vague scope creep risk.
+- **Dropped the DB index in this session rather than leaving it** — user explicitly asked; a new Alembic migration was the correct mechanism (code removal alone doesn't touch schema), applied to the local dev DB and confirmed via `pg_indexes`.
+**Next step:** Build the search UI (still the open M5 item — unaffected by this session's changes beyond `RetrievalHit` no longer carrying `entity_name`/`entity_kind`). Then M6 (repo map + LangGraph agent, now `code_search`/`read_file`/`list_dependencies` — three tools, not four).
+**Watch out for:**
+- **`docker compose` services were left running** from this session's ablation work (`db`, `redis`, `api`, `worker`) — not stopped, since a future session will likely want them again.
+- **`eval/questions.yaml`'s pinned `noetra` snapshot (SHA `31fc158`) still contains `structural.py`** — one keyword question's answer path points at it. This is correct and expected: the eval repo is a frozen historical snapshot, not `develop`, so it stays valid regardless of what `develop` deletes later.
+- **`pg_trgm` the Postgres extension itself was left enabled** — only the index that used it was dropped. Removing the extension too is a separate, not-yet-necessary call.
+
+---
+
+## Session — 2026-07-26 18:12
+
+**Worked on:** No code. Full architecture pivot: retrieval becomes **agentic RAG** (three
+legs — lexical, semantic, graph — driven by an agent that picks its own strategy per query),
+and the AI provider switches from OpenAI to **Google Gemini** (free tier). Realigned every
+doc to match, then split `CLAUDE.md` down to size.
+**Done:**
+- Explored current code state to ground the pivot in what actually exists (lexical-only
+  retrieval, no `core/ai`, `core/config.py` still has unused `anthropic_api_key`/
+  `embedding_provider`/`embedding_api_key` fields, no chat/agent code anywhere).
+- Verified real Gemini/pgvector/LangGraph facts via web search rather than assuming:
+  `gemini-embedding-001` defaults to 3072 dims (Matryoshka-truncatable), only pre-normalizes
+  at 3072, caps input at 2048 tokens, and needs `task_type=RETRIEVAL_DOCUMENT` vs.
+  `CODE_RETRIEVAL_QUERY`; pgvector's HNSW index caps the `vector` type at 2000 dims (hence
+  1536, not 3072); free-tier `gemini-2.5-flash` is roughly 10 RPM / 250 RPD.
+- Wrote a plan (in plan mode) with the user resolving four open design questions: embedding
+  dims (1536, `vector`), the graph leg's wiring (both a seeded third RRF leg **and** direct
+  agent tools — the user's own design), call-graph extraction (build it, name-based
+  resolution), and the agent loop (hand-rolled `StateGraph`, user explicitly wanted to write
+  and understand the whole graph rather than use `create_react_agent`).
+- Rewrote `docs/RETRIEVAL.md` (agentic RAG framing, all three legs, the seeded-expansion
+  design + its RRF-key-alignment trap + its honest coupling cost, Gemini specifics, why no
+  reranker in V1), `CLAUDE.md` (stack, scope, deferred list), `docs/DATA_MODEL.md`
+  (`chunk.embedding` now real/nullable, new `reference_edge` table), `docs/ARCHITECTURE.md`,
+  `docs/WORKFLOW.md` (pipeline gains a real `embedding` stage), `docs/FEATURES.md` (chat tool
+  list, `find_symbol` removed), `docs/SETUP.md` + `.env.example` (`GEMINI_*` vars), and
+  `docs/CONCEPTS.md` (corrected two OpenAI-specific prompt-caching claims to Gemini's
+  implicit-caching behavior).
+- Added an addendum to `docs/LEARNING_LOG.md`'s existing M5 entry — it had no record of the
+  structural-retrieval ablation/removal that happened in the prior session.
+- **Split `CLAUDE.md` down from 206 to 115 lines** (user flagged it was over the ~200-line
+  guideline): extracted the build order into new `docs/BUILD_ORDER.md` and the stack into
+  new `docs/STACK.md`, leaving only enforceable rules inline in `CLAUDE.md` (e.g. "the AI SDK
+  is imported only in `core/ai`") rather than descriptive detail. Also trimmed
+  `docs/RETRIEVAL.md` from 336 to 279 lines by cutting restated prose, keeping every decision
+  and its reasoning intact.
+- Committed as `f271b44` — "Switch retrieval architecture to agentic RAG on Gemini and split
+  stack and build order into their own docs".
+**In progress:** Nothing code-wise — this was a complete, scoped docs-only pivot. **No code
+has been written against the new architecture yet.**
+**Key decisions:**
+- **Semantic retrieval is no longer conditional.** It was gated on "only if lexical fails"
+  because embeddings were expensive to build and redo; at $0 on Gemini's free tier that
+  argument weakens, and the product decision (agentic RAG needs a semantic leg) is made. The
+  eval stays a scoreboard, just not a gate.
+- **The graph leg is fused (seeded from lexical+semantic top hits) AND exposed as direct agent
+  tools** — the user's explicit design. Acknowledged cost: seeding couples the retrievers (a
+  wrong seed gets reinforced, not cancelled out), so M7 ends with the same in/out ablation
+  that cut structural retrieval in M5.
+- **Hand-rolled `StateGraph`, not `create_react_agent`** — user confirmed they want to write
+  and control the whole loop (state, `call_model`, `ToolNode`, `should_continue`) rather than
+  use the prebuilt, specifically to understand and be able to explain it.
+- **No reranker in V1** — no free Gemini reranker exists, and an LLM-as-reranker would spend
+  the same ~10 RPM chat quota the agent loop needs.
+**Next step:** M6 — start with `core/config.py:20-22` (rename the stale
+`anthropic_api_key`/`embedding_provider`/`embedding_api_key` fields to `gemini_*`), then build
+`core/ai/embeddings.py` + `core/ai/chat.py`, the `chunk.embedding` migration, the `embedding`
+pipeline stage, and `semantic_search()` fused via the already-written (currently unused)
+`fusion.py`. Full milestone detail is in `docs/BUILD_ORDER.md`.
+**Watch out for:**
+- **The baseline number changed.** Docs used to quote `recall@5` 0.76 (the pre-structural-
+  removal hybrid figure). The real current lexical-only baseline M6 must beat is **line-level
+  `recall@5` 0.72 / `recall@20` 0.78** — this is now stated explicitly in `CLAUDE.md`/
+  `docs/BUILD_ORDER.md` with a warning not to quote the old number.
+- **`fusion.py` and the `SEMANTIC`/`RetrieverSource` enum slot already exist**, written during
+  M5's structural-retrieval detour and currently unused — M6 wires into them rather than
+  writing new fusion code.
+- **`chunk.entity_id` (already a nullable FK) is load-bearing for M7** — it's what resolves a
+  ranked chunk back to a symbol the graph can seed from, and what maps an expanded entity back
+  to a chunk-aligned `RetrievalHit` so RRF's `(file_id, start_line, end_line)` dedup key still
+  works. Missing that mapping would make the graph leg silently degenerate into concatenation
+  that still looks like it's fusing.
+- Docker services' running state from the prior session was not touched or verified this
+  session (no code/containers were run — this was a docs-only session).

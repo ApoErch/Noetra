@@ -520,7 +520,17 @@ prompt" fast path is noted as a clean V2 seam.
 — for single-user tools on bounded corpora. The trade-off is well known: CAG buys
 simplicity and zero index-build time, and pays for it in per-query cost and corpus size.
 
-**Docs:** [OpenAI prompt caching](https://platform.openai.com/docs/guides/prompt-caching)
+**Update (provider swap → Gemini):** the borrowed idea still holds, but the mechanism has a
+caveat worth knowing. Gemini 2.5 Flash does **implicit caching** — automatic, no API change,
+you just get a discount when a request shares a prefix with a recent one. Unlike OpenAI's,
+it only kicks in **above a minimum prompt length** (order of ~1k tokens), so a short prefix
+gets cached-nothing rather than a small win. That's an argument *for* a substantial repo map
+in the prefix, not against one. There is also **explicit caching** (you create a cache
+object and reference it) if implicit ever proves too unreliable to depend on.
+
+**Docs:** [Gemini context caching](https://ai.google.dev/gemini-api/docs/caching) ·
+[OpenAI prompt caching](https://platform.openai.com/docs/guides/prompt-caching) (the
+original reference for this entry)
 
 ---
 
@@ -540,11 +550,16 @@ Embeddings earn their keep on exactly one class of question: where the user's wo
 says `Session`, `verify`, `cookie`. That is a real and important class. It is also a
 minority of questions.
 
-**How it's used in Noetra:** this is why the build order puts lexical + structural
-retrieval in milestones 4–5 and embeddings in milestone 7 — and why all three get fused
-rather than picking one. It is also why a query that looks like a bare identifier gets
-routed straight to the symbol table with no embedding API call at all (~10 ms instead of
-~100 ms, for a *better* answer).
+**How it's used in Noetra:** this is why the build order puts lexical retrieval in
+milestone 4 and embeddings in milestone 7 — and why they get fused rather than picking
+one. A structural retriever (trigram lookup over `code_entity`) also shipped briefly in
+M5, then got cut: an ablation against the eval set showed it moved recall@5 by only +0.04,
+concentrated in one edge case (identifiers with characters the text-search tokenizer
+mangles) — everywhere else, lexical alone already found the same chunk, because chunking
+is AST-aware so a function's own definition line is usually its highest-signal chunk
+anyway. This is also why a query that looks like a bare identifier gets routed straight to
+lexical's exact-match path with no embedding API call at all (~10 ms instead of ~100 ms,
+for a *better* answer).
 
 **Is this standard?** Increasingly yes — "agentic search" (give the model `grep` plus
 `read_file` plus symbol lookup and let it explore) has become a mainstream alternative to
@@ -964,9 +979,11 @@ matching over file content and symbol names, already indexed at the DB level (a 
 on `content_tsv`, a trigram GIN index on `code_entities.name`).
 
 **How it's used in Noetra:** `core/retrieval/lexical.py` runs
-`content_tsv @@ websearch_to_tsquery('english', :q)` ordered by `ts_rank`.
-`core/retrieval/structural.py` matches symbol names with the trigram `%` operator +
-`similarity()`. **Key choice — `websearch_to_tsquery`** (not `to_tsquery` or
+`content_tsv @@ websearch_to_tsquery('english', :q)` ordered by `ts_rank`. A trigram-based
+`structural.py` retriever also matched symbol names with the `%` operator + `similarity()`
+for a while (M5), but was removed after measurement showed it moving recall@5 by only
++0.04 — see `docs/RETRIEVAL.md`'s decision record. **Key choice — `websearch_to_tsquery`**
+(not `to_tsquery` or
 `plainto_tsquery`): it accepts raw Google-style user input (`auth OR "session cookie"`)
 and *never raises* on junk, whereas `to_tsquery` 500s on a stray space. That safety is why
 it's the right pick for a user-facing search box.
@@ -988,18 +1005,20 @@ lists of 1/(k + rank)`, with `k` a dampening constant (60 is the standard from t
 original paper). An item ranked #1 in a list contributes `1/61`; #2 contributes `1/62`;
 items that rank well in *several* lists rise to the top.
 
-**Why we need it here:** we have two (later three) retrievers whose scores aren't
-comparable — `ts_rank` (a full-text relevance float) and trigram `similarity` (0–1) live
-on totally different scales. Averaging them would be meaningless. RRF sidesteps the problem
-by throwing away the scores and using only rank order.
+**Why we need it here:** retrievers' scores aren't comparable — `ts_rank` (a full-text
+relevance float) and a semantic retriever's cosine similarity (0–1) would live on totally
+different scales. Averaging them would be meaningless. RRF sidesteps the problem by
+throwing away the scores and using only rank order.
 
-**How it's used in Noetra:** `core/retrieval/fusion.py::reciprocal_rank_fusion` takes the
-lexical + structural ranked lists, keys each hit by its code location, sums `1/(k+rank)`,
-unions the source retrievers on duplicates, and returns the top hits. Adding the M7
-semantic leg is just one more list in the input — no other code changes. (Current
-limitation: it dedupes by *exact* line range, so the same location surfaced with slightly
-different ranges by two retrievers isn't merged yet — deferred until the eval shows it
-matters.)
+**How it's used in Noetra:** `core/retrieval/fusion.py::reciprocal_rank_fusion` merges
+ranked lists, keys each hit by its code location, sums `1/(k+rank)`, unions the source
+retrievers on duplicates, and returns the top hits. It briefly fused lexical + a
+structural (trigram) retriever in M5, then went dormant — the structural leg was cut after
+an ablation showed it moving recall@5 by only +0.04 (see `docs/RETRIEVAL.md`), and one
+list alone needs no fusion. It's wired back in — just one more list in the input, no other
+code changes — once the M7 semantic leg ships. (Current limitation: it dedupes by *exact*
+line range, so the same location surfaced with slightly different ranges by two
+retrievers isn't merged yet — deferred until the eval shows it matters.)
 
 **Is this standard?** Yes — RRF is the go-to fusion method for hybrid search (keyword +
 vector); popular precisely because it's robust and needs zero score calibration.
@@ -1018,18 +1037,19 @@ over the import graph (the same "important if many important things link to it" 
 Google used for web pages) — a file many files import is probably central, so its symbols
 make the map; leaf files get trimmed.
 
-**Why we need it here:** agentic search (how the M6 chat agent will work — grep/read in a
-loop, like Claude Code, no embeddings) has one weak moment: the *first* tool call, where it
-must guess a search term with no sense of the codebase's shape. That's worst on vague
-questions ("how is auth implemented?"). The repo map replaces that blind first guess with
-an informed one — built entirely from data we already have, with zero AI calls.
+**Why we need it here:** agentic search (how the chat agent works — search/read in a loop,
+like Claude Code) has one weak moment: the *first* tool call, where it must guess a search
+term with no sense of the codebase's shape. That's worst on vague questions ("how is auth
+implemented?"). The repo map replaces that blind first guess with an informed one — built
+entirely from data we already have, with zero AI calls.
 
-**How it's used in Noetra:** scoped into **Milestone 6** (not built yet). It'll be built
-from `code_entity` (symbol names) + `dependency_edge` (import graph → PageRank centrality)
-and placed in the agent's byte-stable prompt prefix (so OpenAI prompt caching keeps it free
-per follow-up). Caveat: raw centrality over-ranks generic utilities (a `utils.py` everyone
-imports) — PageRank dampens but doesn't fully fix this; fine, because the map only needs to
-*orient* the agent, which then verifies by reading files.
+**How it's used in Noetra:** scoped into **Milestone 8** (not built yet — renumbered when
+the build order moved to agentic RAG). It'll be built from `code_entity` (symbol names) +
+`dependency_edge` (import graph → PageRank centrality) and placed in the agent's byte-stable
+prompt prefix, so Gemini's implicit prefix caching keeps it cheap per follow-up (see the CAG
+entry above for the minimum-prompt-length caveat). Caveat: raw centrality over-ranks generic
+utilities (a `utils.py` everyone imports) — PageRank dampens but doesn't fully fix this;
+fine, because the map only needs to *orient* the agent, which then verifies by reading files.
 
 **Is this standard?** The pattern comes from **aider** (an open-source coding agent), which
 runs PageRank over the repo's dependency graph to build its "repo map". Using a lightweight
@@ -1280,3 +1300,146 @@ The habit: before trusting a number, ask *"who generates the inputs in productio
 who my harness is imitating?"*
 
 **Docs:** [Wikipedia — dataset shift](https://en.wikipedia.org/wiki/Dataset_shift)
+
+---
+
+## Agentic RAG (vs. plain/hybrid RAG)
+
+**What it is:** in plain RAG, retrieval happens **once**, before the model ever sees the
+question — you embed the query, fetch top-k chunks, stuff them in the prompt, generate an
+answer. In **agentic RAG**, retrieval is a *tool* the model itself calls, as many times as
+it wants, in whatever order it decides, mid-reasoning. The model can look at a result, decide
+it's not enough or points somewhere else, and search again — the way a person actually
+investigates a codebase, not a single fixed lookup.
+
+**Why we need it here:** code questions vary wildly in how much digging they need. "Where is
+`createToken` defined?" needs one lookup. "How does authentication work end-to-end?" might
+need a search, then reading the file that came back, then following an import or a function
+call to see who else is involved, then maybe searching again with better words. A single
+fixed retrieval step can't adapt to that — it either over-fetches for the easy question or
+under-fetches for the hard one.
+
+**How it's used in Noetra:** the M8 chat agent is a LangGraph loop with five tools
+(`code_search`, `read_file`, `list_dependencies`, `get_callers`, `get_callees`) that the model
+calls freely until it decides it has enough to answer. `core/retrieval` still does the actual
+retrieving underneath — agentic RAG is a change in *who decides when to call it and how many
+times*, not a replacement for having good retrievers. See `docs/RETRIEVAL.md`.
+
+**Is this standard?** Yes, and increasingly the default for coding agents specifically —
+Claude Code, Cursor, and Copilot's newer agent modes all work this way (search/read in a loop)
+rather than doing one embedding lookup and answering. The term gets used loosely though; the
+real test is whether retrieval strategy can change *per query* based on what the model
+decides, not just "an LLM with some tools attached."
+
+**Docs:** [Anthropic — building effective agents](https://www.anthropic.com/research/building-effective-agents)
+
+---
+
+## Gemini embedding quirks: task_type, dimensions, normalization
+
+**What it is:** three provider-specific details of `gemini-embedding-001` that are each easy
+to get subtly wrong, because getting them wrong doesn't error — it just quietly makes
+retrieval worse.
+
+1. **`task_type` is asymmetric.** You tell the API *what the text you're embedding is for* —
+   `RETRIEVAL_DOCUMENT` when indexing a chunk, `CODE_RETRIEVAL_QUERY` when embedding a user's
+   question. Using the same task type for both sides works, but the vectors land in slightly
+   worse relative positions for the retrieval task specifically.
+2. **Dimensions are truncatable but normalization isn't automatic below the max.** The model's
+   native output is 3072 numbers, and Google supports cutting that down to 1536 or 768
+   (a technique called **Matryoshka Representation Learning** — the embedding is trained so
+   that a prefix of it is *also* a valid, if less precise, embedding). But the API only
+   pre-normalizes the vector to unit length at the full 3072 size — truncate to 1536 and you
+   have to normalize it yourself before comparing vectors by cosine similarity.
+3. **Input caps at 2048 tokens** (~8 KB) — smaller than some function bodies in a real
+   codebase, so long chunks need truncating before they're sent.
+
+**Why we need it here:** we truncate to 1536 dims specifically because pgvector's HNSW index
+(the thing that makes nearest-neighbor search over embeddings fast) only supports up to 2000
+dimensions on its plain `vector` type — 3072 would force a different, less common storage type
+(`halfvec`). Getting the normalization step wrong after truncating wouldn't throw an error;
+it would just make every similarity search return slightly-to-very wrong rankings, silently.
+
+**How it's used in Noetra:** `core/ai/embeddings.py` (M6) is the one place that calls this
+model. It sets `task_type` per direction, truncates long `embed_text` before sending, and
+L2-normalizes every vector it gets back before it's stored in `chunk.embedding vector(1536)`.
+
+**Is this standard?** Yes — every major embedding provider (OpenAI, Cohere, Gemini) that
+offers Matryoshka truncation documents this same "only the max size is pre-normalized"
+caveat. It's a known enough gotcha that it's worth checking explicitly for any embedding model
+before trusting cosine similarity on a truncated vector.
+
+**Docs:** [Gemini embeddings guide](https://ai.google.dev/gemini-api/docs/embeddings) ·
+[Matryoshka Representation Learning (paper)](https://arxiv.org/abs/2205.13147)
+
+---
+
+## Hand-rolling a LangGraph `StateGraph` vs. `create_react_agent`
+
+**What it is:** LangGraph's `langgraph.prebuilt.create_react_agent` is a one-line function
+that builds a complete "call the model, run any tool calls, loop until done" agent for you.
+The alternative is defining the same loop yourself as an explicit `StateGraph`: you write the
+state object (what gets threaded through every step), the node that calls the model, the node
+that runs tools, and the edge/function that decides "loop again" vs. "we're done."
+
+**Why we need it here:** the prebuilt gets you a working agent fast, but it also means the
+loop's internals are someone else's code. Noetra's agent needs two custom behaviors that are
+awkward to bolt onto a prebuilt: collecting citations from tool results as the loop runs (not
+asking the model to report them), and priming the prompt with a stable repo map. A hand-rolled
+graph makes both just... a node, written in plain code you can read top to bottom.
+
+**How it's used in Noetra:** M8's `core/agent/graph.py` defines the loop explicitly:
+
+```
+START ──> call_model ──> should_continue? ──> tools ──┐
+                              │                       │
+                              └──> END       <────────┘
+```
+
+`call_model` binds the five retrieval tools and invokes `gemini-2.5-flash`; a `ToolNode`
+executes whatever tool calls came back; `should_continue` checks the last message for pending
+tool calls and either loops back to `call_model` or ends. LangGraph's job here is only to
+*execute* this graph (manage the state passing between nodes) — the actual decision logic is
+all ours.
+
+**Is this standard?** Both are legitimate, standard LangGraph usage — `create_react_agent` is
+literally in `langgraph.prebuilt`, meant for exactly this. The trade-off is the classic one
+between a framework default (less code, less control, matches "do it the standard way" for
+simple cases) and writing the mechanism yourself (more code, but nothing about how the loop
+works is hidden from you). For a project meant partly for learning and being able to explain
+the agent loop in an interview, hand-rolling is the deliberate choice here.
+
+**Docs:** [LangGraph — build a basic ReAct agent from scratch](https://langchain-ai.github.io/langgraph/tutorials/introduction/) ·
+[Google's own from-scratch ReAct + Gemini example](https://ai.google.dev/gemini-api/docs/langgraph-example)
+
+---
+
+## Seeding a graph traversal from search hits (and why it couples retrievers)
+
+**What it is:** the M7 graph leg isn't a retriever you can query directly with English text —
+it walks edges between known locations. So to make it contribute to a fused search result, we
+**seed** it: take the top few hits lexical and semantic already found, resolve each to a code
+symbol, and walk outward from those symbols (who calls them, what imports them) up to a couple
+of hops. That walk becomes a third ranked list, fused in via RRF alongside the other two.
+
+**Why we need it here:** it's the only way to get graph traversal into a single fused ranking
+at all, since traversal has no notion of "how well does this match the query" on its own — it
+only knows "how far is this from a starting point." But seeding from the *other* retrievers'
+top hits means the graph leg isn't independent of them: if lexical and semantic both latch
+onto the wrong file, the graph leg then walks outward from that same wrong file and returns
+more results that reinforce the mistake, instead of an independent signal that might catch it.
+
+**How it's used in Noetra:** deliberately accepted as a trade-off, not an oversight — the
+alternative (an independent graph retriever) doesn't really exist for this kind of data. The
+safeguard is measurement: M7 ends with the same in/out ablation (run the eval with the graph
+leg in the fusion, then out, compare `recall@k`) that got the trigram symbol-lookup retriever
+cut back in M5. If the coupling costs more than the leg gains, the number will show it.
+
+**Is this standard?** The general pattern — expand a retrieved result via a knowledge graph or
+citation graph, then re-rank — shows up in academic search and recommendation systems, and is
+sometimes called "graph-based re-ranking" or "seed-and-expand." The coupling risk described
+here is the same reason ensemble methods generally prefer *independent* models: correlated
+errors don't cancel out the way independent ones do, which is precisely what RRF over
+independent retrievers is designed to exploit.
+
+**Docs:** [Reciprocal Rank Fusion (original paper, Cormack et al. 2009)](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)

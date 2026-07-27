@@ -2,165 +2,63 @@
 
 Point Noetra at a GitHub repo → it clones, indexes, and lets you **chat with and
 search** the codebase through an AI agent that answers with exact file + line
-citations. Grounded QA over a codebase is the product; **retrieval quality is the
-whole game** (see `docs/RETRIEVAL.md`).
+citations. Grounded QA over a codebase is the product. **Retrieval quality is the
+whole game**.
 
-## Session start (do this first)
+# Workflow
 
-Read the newest entry in `docs/SESSION_LOG.md` to pick up where the last session left
-off. If it doesn't exist yet, skip this. (The `/endsession` skill writes those entries.)
-
-## How I work with you — mentoring mode (applies to every task)
-
-I'm building Noetra to **learn**, so teach as you build.
-
-**IMPORTANT: explain your reasoning, not just your conclusion.** When you decide we need
+- Read the newest entry in @docs/SESSION_LOG.md to pick up where the last session left off.
+- Explain your reasoning, not just your conclusion. When you decide we need
 something (e.g. "add a session secret"), first tell me *how you got there and why* —
-your approach to the problem — then implement. Never hand me a decision with no path to it.
-
-**Who I am:** junior SWE, ~1.5 YOE. Building this to learn, then to compete for junior
-SWE and junior AI / data / ML roles at strong (tier A–S) companies.
-- **I know the basics of (don't re-teach):** React, TypeScript, FastAPI, Python,
-  C#/Unity, LangGraph.
-- **New to me (explain the first time it appears):** Celery, Redis, Tree-sitter,
-  pgvector, deep Docker, AWS — and most of auth/security, networking, databases,
-  distributed systems, and retrieval. **When unsure whether I know something, assume I
-  don't.** Knowing FastAPI basics ≠ knowing web-session security — don't skip a concept
-  just because it sits next to one I know.
-
-**Keep explanations tight:** simple words + one concrete example or analogy; define any
-term in the same breath; **name the pattern** ("this is reciprocal rank fusion") so I can
+your approach to the problem — then implement.
+- Keep explanations tight: simple words + one small mock data example or analogy to help me understand the core concept; 
+- Name the pattern. For example,  "this is reciprocal rank fusion", so I can
 look it up; give the real trade-off (what else we could do, why this wins); link the
 **official** docs. Idea + reason + example + link — no walls of text.
-
-**Teach system design, not just this file.** For architectural choices, name the general
-pattern, the alternatives, and where the same trade-off shows up in industry. Call out
-classic trade-offs by name (consistency vs. availability, latency vs. throughput,
-coupling vs. duplication).
-
-**When you add or wire a new file, show me how it fits:** where it lives, who calls it /
-what it calls, the data flow through it, and what I'll see when it runs. A quick arrow
-sketch is ideal.
-
-**IMPORTANT — do it the standard way, not the fancy way.** Use the correct,
-industry-standard approach for each area (auth, DB access, API design, error handling),
-and tell me when something *is* the standard. **Don't over-engineer** — no extra
-abstraction, defensive layers, or speculative generality I didn't ask for. When you
-finish an area, finish it cleanly: no dead code, stubs, or half-wired leftovers.
-
-**Approval gate:** before running any command, state it, say what it does and why, then
-**wait for my go-ahead**. Never explain-then-run in the same turn.
+- Use the correct, industry-standard approach for each area (auth, DB access, API design, error handling),
+and inform me when something *is* the standard.
+- Don't over-engineer. No extra abstraction, defensive layers, or speculative generality I didn't ask for.
+- When you finish an area, finish it cleanly: no dead code, stubs, or half-wired leftovers.
+- Before running any command, state it, say what it does and why, then wait for my go-ahead. Never explain-then-run in the same turn. Only exception to this is when using Fetch or Web search tools.
 
 ## V1 scope
 
-GitHub OAuth login (required before any import) · repo import — public URL (plain clone) or private repo (clone with the user's decrypted token) · background indexing
-pipeline (clone+lexical index → parse+symbols → graph → chunk → embed → metrics) ·
-**hybrid retrieval** (lexical + structural + semantic, RRF-fused) · a **retrieval eval
-set** that keeps that hybrid honest · streamed LangGraph chat agent with citations ·
-hybrid search · basic dashboard (files, functions, LOC, language breakdown, largest files).
+1. GitHub OAuth login
+2. Repo import: public URL (plain clone) or private repo (clone with the user's decrypted token)
+3. Background indexing pipeline: (clone+lexical index → parse+symbols → graph → chunk → embed → metrics)
+4. Agentic RAG: three retrieval legs (lexical + semantic, RRF-fused, plus graph
+traversal) driven by an agent that picks its own strategy per query. Also a **retrieval eval
+set** that keeps all three honest
+5. Streamed LangGraph chat agent with citations
+6. basic dashboard (files, functions, LOC, language breakdown, largest files).
+Languages at launch: Python, JavaScript, TypeScript. Nothing else.
 
-That arrow chain is the **pipeline order** — what happens during a single indexing run of
-one repo, every time. Don't confuse it with the **build order** below, which is the
-sequence in which the code gets written over the life of the project. They're separate
-decisions that happen to follow the same principle: *cheap and deterministic first, slow
-and expensive last.*
+## Code style
 
-In the pipeline, that means the lexical index, symbol table, and import graph all finish
-before chunking and embedding start — so a repo becomes searchable minutes into indexing
-rather than only when the slowest stage completes.
-
-**Languages at launch:** Python, JavaScript, TypeScript. Nothing else.
-
-**Deferred to V2 (leave clean extension points, don't build):** security scanner,
-architecture graph viz (React Flow), AI code/PR review, advanced metrics.
-
-## Stack
-
-React + TS + Tailwind + Monaco + TanStack Query · FastAPI + Pydantic v2 + SQLAlchemy ·
-Celery + Redis · Postgres + pgvector · Tree-sitter · **OpenAI API for chat + embeddings**
-(`text-embedding-3-small`, 1536 dims). Both **must stay behind one interface in `core/ai`**
-so the provider is swappable — nothing outside `core/ai` imports the OpenAI SDK.
-Docker Compose local, GitHub Actions CI, AWS deploy (`docs/DEPLOYMENT.md`).
-
-## Module boundaries (respect these when adding code)
-
-Structure is already built — read the real tree from the repo. What matters is intent:
-- `backend/api` — FastAPI: auth, REST, retrieval + agent endpoints. **HTTP boundary
+- @backend/api — FastAPI: auth, REST, retrieval + agent endpoints. **HTTP boundary
   only; no slow work inline.**
-- `backend/worker` — Celery tasks: the indexing pipeline. **All slow / repo-touching
+- @backend/worker — Celery tasks: the indexing pipeline. **All slow / repo-touching
   work lives here.**
-- `backend/core` — shared: DB models, schemas, GitHub client, `ai` + embeddings,
+- @backend/core — shared: DB models, schemas, GitHub client, `ai` + embeddings,
   retrieval, agent graph.
-- `backend/indexer` — pure parsing (Tree-sitter, AST chunking, symbol table, dep graph).
-  **No DB, no HTTP** — stays unit-testable in isolation.
-
-**Rules:** `api` and `worker` import `core` and `indexer`; `indexer` imports neither.
-Retrieval lives **only** in `core/retrieval`.
-
-## Build order (each milestone runs end-to-end before the next)
-
-**Ordering principle: build retrievers in cost order — cheap first, measure, then buy the
-expensive one.** Lexical search is cheap to build and cheap to throw away. Embeddings are
-neither: changing the chunking strategy means re-embedding the whole corpus, and that
-strategy is exactly what tends to change after first contact with real failing queries.
-So the eval set and the citation UI land *before* pgvector, and semantic retrieval has to
-earn its slot by moving `recall@k` on questions the cheap retrievers demonstrably fail.
-
-This works because `file.content` is already persisted at clone time (M3). A Postgres
-`tsvector` index over it is one migration and zero pipeline cost, which is enough
-retrieval to build the agent and the whole citation path against.
-
-Progress is logged in `docs/LEARNING_LOG.md`. **Done: M1 Skeleton, M2 Auth.**
-**Done M3. Import + clone (enqueue Celery job, clone, persist `Repository` + status)**
-4. Parse + extract (Tree-sitter py/js/ts → files + entities = the symbol table), plus the
-   two things that ride along free with it: the **lexical index** (`tsvector` + `pg_trgm`)
-   and the **dependency graph** (resolve the imports the parser already extracted). No AI
-   calls in this milestone at all.
-5. **Eval harness** (~40 questions with known answer locations → `recall@k`) + search
-   endpoint & UI over lexical + structural. First end-to-end `file:line` citations, and
-   the scoreboard every later retrieval change is judged against.
-6. Chat agent (LangGraph: `code_search`, `find_symbol`, `read_file`, `list_dependencies`;
-   multi-step loop, streamed, cited) — ship-quality MVP. All four tools have real data
-   behind them by now. The agent is oriented by a **repo map** — a PageRank-ranked, AI-free
-   "table of contents" (top symbols per file, ranked by import-graph centrality) built from
-   `code_entity` + `dependency_edge` and placed in the stable prompt prefix, so the agent's
-   first move is informed instead of a blind keyword guess. See `RETRIEVAL.md`.
-7. **(Conditional)** AST chunking + embeddings (chunk by function/class → pgvector) + the
-   semantic leg and reranking — built **only if** the M5 eval set shows the cheap
-   lexical + structural + agent + repo-map stack actually failing questions that embeddings
-   would fix. Entered with a measured baseline and a known list of failures; if the baseline
-   already clears the bar, this milestone may never be built. **No retriever joins the
-   fusion without a `recall@k` movement that justifies it.**
-8. Basic metrics + dashboard
-
-Milestone 7 is where the old plan's steps 5–6 went, and the old "chat v1 single-shot RAG
-then chat v2 agent" split collapsed into milestone 6 — see `docs/FEATURES.md` §4 for why
-shipping the agent directly is the smaller piece of work, not the larger one.
-
-## Conventions
-
-- Strict typing both sides (mypy / TS strict). REST under `/api/v1`; validate with
-  Pydantic at the boundary.
+- @backend/indexer — pure parsing (Tree-sitter, AST chunking, symbol table, dep graph).**No DB, no HTTP** in order the indexer stays unit-testable in isolation.
+- `api` and `worker` import `core` and `indexer`; `indexer` imports neither.
+- Retrieval lives **only** in `core/retrieval`.
+- The AI SDK is imported **only** in `core/ai` — no exceptions, that seam is the entire cost of swapping providers later.
+- Strict typing both sides (mypy / TS strict). REST under `/api/v1`; validate with Pydantic at the boundary.
 - Anything touching a repo is a Celery task in `worker` — never inline in `api`.
-- Status is first-class: `queued → cloning → parsing → graphing → chunking → embedding →
-  metrics → ready | failed`, surfaced to the UI. (Same set of states as before; `graphing`
-  moved ahead of `chunking`/`embedding` to match the pipeline order above. The
-  `RepositoryStatus` enum in `core/models.py` already holds every value — only the order
-  the worker advances through them changes.)
 - Secrets via env only; keep `.env.example` current.
 - Everything scoped by `repository_id`; ownership checked on every read.
 
-## Reference docs
+## Additional Instructions
 
-| File | Contents |
-|------|----------|
-| `docs/RETRIEVAL.md` | **Read first.** Hybrid retrieval design — the core engineering |
-| `docs/ARCHITECTURE.md` | Components, data flow, service responsibilities |
-| `docs/WORKFLOW.md` | User journey + indexing pipeline, step by step |
-| `docs/DATA_MODEL.md` | Database schema and core entities |
-| `docs/FEATURES.md` | Per-feature spec + V2 notes |
-| `docs/SETUP.md` | Local dev: services, env vars, first-run commands |
-| `docs/DEPLOYMENT.md` | AWS deployment target (phased) |
-| `docs/LEARNING_LOG.md` | Interview-ready log, one entry per milestone |
-| `docs/CONCEPTS.md` | Personal glossary of concepts new to me |
-| `docs/SESSION_LOG.md` | Session-to-session handoff (written by `/endsession`) |
+- Agentic RAG design — the core engineering: @docs/RETRIEVAL.md
+- Milestones, current status, ordering rationale: @docs/BUILD_ORDER.md
+- Every library and provider, and why each was chosen: @docs/STACK.md
+- Components, data flow, service responsibilities: @docs/ARCHITECTURE.md
+- User journey and indexing pipeline, step by step: @docs/WORKFLOW.md
+- Database schema and core entities: @docs/DATA_MODEL.md
+- Per-feature spec: @docs/FEATURES.md
+- Local dev such as services, env vars, first-run commands: @docs/SETUP.md
+- AWS deployment target (phased): @docs/DEPLOYMENT.md
+- Session-to-session handoff (written by `/endsession`): @docs/SESSION_LOG.md

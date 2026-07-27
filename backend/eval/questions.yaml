@@ -7,7 +7,9 @@
 # `kind` is the whole point of the breakdown — each kind is a different retriever's job,
 # so the by-kind scoreboard says *which* retriever is weak, not just that recall is low:
 #   symbol      — a short identifier-shaped query, the way a code search box gets typed
-#                 into. Structural (pg_trgm over code_entities) should own these.
+#                 into. Lexical (tsvector) owns these too now — structural (pg_trgm fuzzy
+#                 match over code_entities) was tried here and cut after the M5 ablation
+#                 showed only a marginal recall gain (see docs/RETRIEVAL.md).
 #   keyword     — words that literally appear in the source. Lexical (tsvector) owns these.
 #   conceptual  — the user's words appear NOWHERE in the file. Neither cheap retriever can
 #                 do anything but get lucky. This bucket is the entire case for or against

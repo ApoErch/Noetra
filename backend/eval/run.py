@@ -27,7 +27,7 @@ _KS = (5, 20)
 class QuestionKind(str, enum.Enum):
     """What kind of retrieval a question exercises — the breakdown that decides whether M7 is built."""
 
-    SYMBOL = "symbol"  # names an identifier that exists verbatim; structural should nail it
+    SYMBOL = "symbol"  # names an identifier that exists verbatim; lexical's job too, just a distinct shape of query
     KEYWORD = "keyword"  # words that literally appear in the source; lexical's job
     CONCEPTUAL = "conceptual"  # the user's words appear nowhere in the code; only embeddings can help
     # A guard-rail bucket, not a retrieval target: the answer genuinely lives in prose
@@ -134,8 +134,8 @@ def evaluate_question(db: Session, question: EvalQuestion, repo_id: uuid.UUID) -
                 continue
             if file_rank is None:
                 file_rank = rank
-            # Overlap, not containment: a one-line lexical hit inside a function and a
-            # whole-function structural hit are both "found it".
+            # Overlap, not containment: a one-line lexical hit anywhere inside the answer's
+            # enclosing definition still counts as "found it".
             overlaps = hit.start_line <= answer.end_line and hit.end_line >= answer.start_line
             if overlaps and line_rank is None:
                 line_rank = rank
