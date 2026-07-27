@@ -1300,3 +1300,146 @@ The habit: before trusting a number, ask *"who generates the inputs in productio
 who my harness is imitating?"*
 
 **Docs:** [Wikipedia — dataset shift](https://en.wikipedia.org/wiki/Dataset_shift)
+
+---
+
+## Agentic RAG (vs. plain/hybrid RAG)
+
+**What it is:** in plain RAG, retrieval happens **once**, before the model ever sees the
+question — you embed the query, fetch top-k chunks, stuff them in the prompt, generate an
+answer. In **agentic RAG**, retrieval is a *tool* the model itself calls, as many times as
+it wants, in whatever order it decides, mid-reasoning. The model can look at a result, decide
+it's not enough or points somewhere else, and search again — the way a person actually
+investigates a codebase, not a single fixed lookup.
+
+**Why we need it here:** code questions vary wildly in how much digging they need. "Where is
+`createToken` defined?" needs one lookup. "How does authentication work end-to-end?" might
+need a search, then reading the file that came back, then following an import or a function
+call to see who else is involved, then maybe searching again with better words. A single
+fixed retrieval step can't adapt to that — it either over-fetches for the easy question or
+under-fetches for the hard one.
+
+**How it's used in Noetra:** the M8 chat agent is a LangGraph loop with five tools
+(`code_search`, `read_file`, `list_dependencies`, `get_callers`, `get_callees`) that the model
+calls freely until it decides it has enough to answer. `core/retrieval` still does the actual
+retrieving underneath — agentic RAG is a change in *who decides when to call it and how many
+times*, not a replacement for having good retrievers. See `docs/RETRIEVAL.md`.
+
+**Is this standard?** Yes, and increasingly the default for coding agents specifically —
+Claude Code, Cursor, and Copilot's newer agent modes all work this way (search/read in a loop)
+rather than doing one embedding lookup and answering. The term gets used loosely though; the
+real test is whether retrieval strategy can change *per query* based on what the model
+decides, not just "an LLM with some tools attached."
+
+**Docs:** [Anthropic — building effective agents](https://www.anthropic.com/research/building-effective-agents)
+
+---
+
+## Gemini embedding quirks: task_type, dimensions, normalization
+
+**What it is:** three provider-specific details of `gemini-embedding-001` that are each easy
+to get subtly wrong, because getting them wrong doesn't error — it just quietly makes
+retrieval worse.
+
+1. **`task_type` is asymmetric.** You tell the API *what the text you're embedding is for* —
+   `RETRIEVAL_DOCUMENT` when indexing a chunk, `CODE_RETRIEVAL_QUERY` when embedding a user's
+   question. Using the same task type for both sides works, but the vectors land in slightly
+   worse relative positions for the retrieval task specifically.
+2. **Dimensions are truncatable but normalization isn't automatic below the max.** The model's
+   native output is 3072 numbers, and Google supports cutting that down to 1536 or 768
+   (a technique called **Matryoshka Representation Learning** — the embedding is trained so
+   that a prefix of it is *also* a valid, if less precise, embedding). But the API only
+   pre-normalizes the vector to unit length at the full 3072 size — truncate to 1536 and you
+   have to normalize it yourself before comparing vectors by cosine similarity.
+3. **Input caps at 2048 tokens** (~8 KB) — smaller than some function bodies in a real
+   codebase, so long chunks need truncating before they're sent.
+
+**Why we need it here:** we truncate to 1536 dims specifically because pgvector's HNSW index
+(the thing that makes nearest-neighbor search over embeddings fast) only supports up to 2000
+dimensions on its plain `vector` type — 3072 would force a different, less common storage type
+(`halfvec`). Getting the normalization step wrong after truncating wouldn't throw an error;
+it would just make every similarity search return slightly-to-very wrong rankings, silently.
+
+**How it's used in Noetra:** `core/ai/embeddings.py` (M6) is the one place that calls this
+model. It sets `task_type` per direction, truncates long `embed_text` before sending, and
+L2-normalizes every vector it gets back before it's stored in `chunk.embedding vector(1536)`.
+
+**Is this standard?** Yes — every major embedding provider (OpenAI, Cohere, Gemini) that
+offers Matryoshka truncation documents this same "only the max size is pre-normalized"
+caveat. It's a known enough gotcha that it's worth checking explicitly for any embedding model
+before trusting cosine similarity on a truncated vector.
+
+**Docs:** [Gemini embeddings guide](https://ai.google.dev/gemini-api/docs/embeddings) ·
+[Matryoshka Representation Learning (paper)](https://arxiv.org/abs/2205.13147)
+
+---
+
+## Hand-rolling a LangGraph `StateGraph` vs. `create_react_agent`
+
+**What it is:** LangGraph's `langgraph.prebuilt.create_react_agent` is a one-line function
+that builds a complete "call the model, run any tool calls, loop until done" agent for you.
+The alternative is defining the same loop yourself as an explicit `StateGraph`: you write the
+state object (what gets threaded through every step), the node that calls the model, the node
+that runs tools, and the edge/function that decides "loop again" vs. "we're done."
+
+**Why we need it here:** the prebuilt gets you a working agent fast, but it also means the
+loop's internals are someone else's code. Noetra's agent needs two custom behaviors that are
+awkward to bolt onto a prebuilt: collecting citations from tool results as the loop runs (not
+asking the model to report them), and priming the prompt with a stable repo map. A hand-rolled
+graph makes both just... a node, written in plain code you can read top to bottom.
+
+**How it's used in Noetra:** M8's `core/agent/graph.py` defines the loop explicitly:
+
+```
+START ──> call_model ──> should_continue? ──> tools ──┐
+                              │                       │
+                              └──> END       <────────┘
+```
+
+`call_model` binds the five retrieval tools and invokes `gemini-2.5-flash`; a `ToolNode`
+executes whatever tool calls came back; `should_continue` checks the last message for pending
+tool calls and either loops back to `call_model` or ends. LangGraph's job here is only to
+*execute* this graph (manage the state passing between nodes) — the actual decision logic is
+all ours.
+
+**Is this standard?** Both are legitimate, standard LangGraph usage — `create_react_agent` is
+literally in `langgraph.prebuilt`, meant for exactly this. The trade-off is the classic one
+between a framework default (less code, less control, matches "do it the standard way" for
+simple cases) and writing the mechanism yourself (more code, but nothing about how the loop
+works is hidden from you). For a project meant partly for learning and being able to explain
+the agent loop in an interview, hand-rolling is the deliberate choice here.
+
+**Docs:** [LangGraph — build a basic ReAct agent from scratch](https://langchain-ai.github.io/langgraph/tutorials/introduction/) ·
+[Google's own from-scratch ReAct + Gemini example](https://ai.google.dev/gemini-api/docs/langgraph-example)
+
+---
+
+## Seeding a graph traversal from search hits (and why it couples retrievers)
+
+**What it is:** the M7 graph leg isn't a retriever you can query directly with English text —
+it walks edges between known locations. So to make it contribute to a fused search result, we
+**seed** it: take the top few hits lexical and semantic already found, resolve each to a code
+symbol, and walk outward from those symbols (who calls them, what imports them) up to a couple
+of hops. That walk becomes a third ranked list, fused in via RRF alongside the other two.
+
+**Why we need it here:** it's the only way to get graph traversal into a single fused ranking
+at all, since traversal has no notion of "how well does this match the query" on its own — it
+only knows "how far is this from a starting point." But seeding from the *other* retrievers'
+top hits means the graph leg isn't independent of them: if lexical and semantic both latch
+onto the wrong file, the graph leg then walks outward from that same wrong file and returns
+more results that reinforce the mistake, instead of an independent signal that might catch it.
+
+**How it's used in Noetra:** deliberately accepted as a trade-off, not an oversight — the
+alternative (an independent graph retriever) doesn't really exist for this kind of data. The
+safeguard is measurement: M7 ends with the same in/out ablation (run the eval with the graph
+leg in the fusion, then out, compare `recall@k`) that got the trigram symbol-lookup retriever
+cut back in M5. If the coupling costs more than the leg gains, the number will show it.
+
+**Is this standard?** The general pattern — expand a retrieved result via a knowledge graph or
+citation graph, then re-rank — shows up in academic search and recommendation systems, and is
+sometimes called "graph-based re-ranking" or "seed-and-expand." The coupling risk described
+here is the same reason ensemble methods generally prefer *independent* models: correlated
+errors don't cancel out the way independent ones do, which is precisely what RRF over
+independent retrievers is designed to exploit.
+
+**Docs:** [Reciprocal Rank Fusion (original paper, Cormack et al. 2009)](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)

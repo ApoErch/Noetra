@@ -82,7 +82,7 @@ pgvector keeps embeddings in the same DB — no second datastore in V1.
   Gemini → streamed answer with `file:line` citations → web. Tool-call status streams
   alongside tokens, so a multi-second loop reads as alive rather than hung.
 
-## Boundaries / rules
+## Rules
 
 - The request cycle never clones, parses, or embeds — always a Celery task.
 - All Gemini calls (chat + embeddings) go through `core/ai`.
