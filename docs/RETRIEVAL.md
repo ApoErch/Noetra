@@ -162,9 +162,10 @@ constraints, not later optimizations.
   question early in it — one changed byte invalidates every cached token after it.
 - **Stream tool-call status, not just tokens.** A 10 s loop showing *"searching
   `TokenService`… reading `auth/tokens.py`…"* is the difference between alive and hung.
-- **Free-tier limits shape the architecture.** `gemini-2.5-flash` is ~10 RPM / 250 RPD and an
-  agent turn is 3–6 calls, so a 46-question agent eval is ~200 calls — most of a day. It
-  **must** checkpoint per question and resume. Likewise `chunk.embedding` is **nullable** and
+- **Free-tier limits shape the architecture.** `gemini-3.5-flash` is ~15 RPM / 1,500 RPD and an
+  agent turn is 3–6 calls, so a 46-question agent eval is ~200 calls — comfortably inside the
+  RPD budget, but 200 calls at 15 RPM is still ~15–20 minutes of real wall-clock pacing, and
+  any 429 mid-run still needs to resume rather than restart. Likewise `chunk.embedding` is **nullable** and
   the embedding stage selects `WHERE embedding IS NULL`, so a 429 resumes instead of
   restarting the repo.
 
@@ -183,7 +184,7 @@ START ──> call_model ──> should_continue? ──> tools ──┐
 ```
 
 We define the state (messages + accumulated citations), `call_model` (bind tools, invoke
-`gemini-2.5-flash`), the `ToolNode`, and `should_continue` (tool calls present → loop; none →
+`gemini-3.5-flash`), the `ToolNode`, and `should_continue` (tool calls present → loop; none →
 finish). LangGraph supplies only the runtime — it's a state-machine executor, not the agent.
 Writing it out is what makes the citation-collection node and repo-map priming natural.
 

@@ -11,7 +11,7 @@ host during dev — choose per component.
 - A GitHub OAuth app (Client ID + Secret)
 - A Google Gemini API key — used for both chat and embeddings. Free tier is enough;
   get one at <https://aistudio.google.com/apikey>. Note the free-tier limits (roughly
-  10 RPM / 250 RPD on `gemini-2.5-flash`) — they're low enough to shape how you test.
+  15 RPM / 1,500 RPD on `gemini-3.5-flash`) — they're low enough to shape how you test.
 
 ## Services (docker-compose)
 
@@ -44,7 +44,7 @@ GITHUB_OAUTH_CALLBACK=http://localhost:8000/api/v1/auth/callback
 FRONTEND_URL=http://localhost:5173
 # ai — one provider, both uses; read only by core/ai
 GEMINI_API_KEY=
-GEMINI_CHAT_MODEL=gemini-2.5-flash
+GEMINI_CHAT_MODEL=gemini-3.5-flash
 GEMINI_EMBEDDING_MODEL=gemini-embedding-001
 GEMINI_EMBEDDING_DIMENSIONS=1536   # must match chunk.embedding's vector(N); changing it = full re-embed
 # app

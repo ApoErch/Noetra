@@ -34,7 +34,7 @@ tools" and "embed these strings" — which is the entire cost of switching provi
 
 | | Model | Notes |
 |---|---|---|
-| Chat | `gemini-2.5-flash` | Agent loop. Free tier. |
+| Chat | `gemini-3.5-flash` | Agent loop. Free tier. |
 | Embeddings | `gemini-embedding-001` | **1536 dims** (truncated from its 3072 default). |
 
 **Why 1536 and not 3072:** pgvector's HNSW index caps the `vector` type at 2000 dimensions —
@@ -51,7 +51,7 @@ Three provider details that are easy to get wrong and are `core/ai`'s job to abs
 
 ### Free-tier limits are a design constraint
 
-`gemini-2.5-flash` is roughly **10 RPM / 250 RPD** and one agent turn is 3–6 model calls.
+`gemini-3.5-flash` is roughly **15 RPM / 1,500 RPD** and one agent turn is 3–6 model calls.
 That shapes architecture, not just testing:
 
 - The agent eval (~200 calls for a full pass) **must checkpoint per question and resume**.

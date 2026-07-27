@@ -23,7 +23,7 @@
                               ▼                ▼                ▼
                          Tree-sitter       Gemini API       Git / GitHub API
                          (parse+chunk)   (chat / embed)     (clone / metadata)
-                                        gemini-2.5-flash
+                                        gemini-3.5-flash
                                         gemini-embedding-001
 ```
 

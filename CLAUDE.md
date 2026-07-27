@@ -19,7 +19,7 @@ look it up; give the real trade-off (what else we could do, why this wins); link
 and inform me when something *is* the standard.
 - Don't over-engineer. No extra abstraction, defensive layers, or speculative generality I didn't ask for.
 - When you finish an area, finish it cleanly: no dead code, stubs, or half-wired leftovers.
-- Before running any command, state it, say what it does and why, then wait for my go-ahead. Never explain-then-run in the same turn.
+- Before running any command, state it, say what it does and why, then wait for my go-ahead. Never explain-then-run in the same turn. Only exception to this is when using Fetch or Web search tools.
 
 ## V1 scope
 
