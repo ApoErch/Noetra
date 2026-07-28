@@ -32,13 +32,13 @@ def parse_legs(raw: str | None) -> tuple[RetrieverSource, ...] | None:
 _QUESTIONS_PATH = Path(__file__).parent / "questions.yaml"
 
 # The cutoffs the scoreboard reports. 5 is "what the user sees without scrolling";
-# 20 is "what the M6 agent can afford to read" — a retriever that only clears @20 is
+# 20 is "what the M8 agent can afford to read" — a retriever that only clears @20 is
 # still usable by the agent but not by the search UI.
 _KS = (5, 20)
 
 
 class QuestionKind(str, enum.Enum):
-    """What kind of retrieval a question exercises — the breakdown that decides whether M7 is built."""
+    """What kind of retrieval a question exercises — the breakdown the M6/M7 leg measurements are scored by."""
 
     SYMBOL = "symbol"  # names an identifier that exists verbatim; lexical's job too, just a distinct shape of query
     KEYWORD = "keyword"  # words that literally appear in the source; lexical's job
@@ -199,8 +199,8 @@ def report(results: list[QuestionResult]) -> None:
     for repo_key, subset in sorted(by_repo.items()):
         print(_format_row(repo_key, subset))
 
-    # The miss list is the working input to M7: if embeddings are ever built, these are
-    # the questions they have to fix to justify the cost.
+    # The miss list is the working input to whichever leg builds next (M7's graph leg) —
+    # these are the questions it has to fix to justify the cost.
     misses = [r for r in results if r.line_rank is None or r.line_rank > max(_KS)]
     print(f"\nmisses — no correct location in top {max(_KS)} ({len(misses)}/{len(results)})")
     for result in misses:

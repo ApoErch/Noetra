@@ -58,10 +58,11 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
 - Ranked results with `file:line` + one-line context. Click → open in Monaco at that line.
 - Build note: shipped in milestone 5 with **lexical + structural v1**, then structural v1 was
   removed after an eval-driven ablation showed it moving recall@5 by only +0.04 — see
-  `RETRIEVAL.md`'s decision record. Lexical-only today; gains the semantic leg in milestone 6
-  and the graph leg in milestone 7. **The endpoint contract and the UI don't change through
-  any of that** — only what's behind `core/retrieval` does. Shipping search early is what
-  proved the citation path end-to-end and gave the eval harness something to measure.
+  `RETRIEVAL.md`'s decision record. Milestone 6 added the semantic leg, fused via RRF (its
+  recall delta is still being measured — `RETRIEVAL.md`); the graph leg lands in milestone 7.
+  **The endpoint contract and the UI don't change through any of that** — only what's behind
+  `core/retrieval` does. Shipping search early is what proved the citation path end-to-end
+  and gave the eval harness something to measure.
 - Lexical results are available once `status` passes `chunking`; the fused semantic leg needs
   `embedding` to finish. The file tree unlocks earlier, right after `cloning`.
 

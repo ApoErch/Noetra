@@ -86,16 +86,26 @@ docker compose exec db psql -U noetra   # inspect the DB
 docker compose down -v                  # reset everything (drops volumes)
 
 # retrieval eval (the scoreboard — see RETRIEVAL.md)
-docker compose exec worker python -m eval.seed           # clone + index the 3 pinned repos
-docker compose exec worker python -m eval.seed --force   # re-seed; MANDATORY after any
-                                                         # chunker or embedding change
-docker compose exec worker python -m eval.run            # recall@5 / recall@20 scoreboard
+docker compose exec worker python -m eval.seed             # clone + index + embed the 3 pinned repos
+docker compose exec worker python -m eval.seed --force     # re-seed; MANDATORY after any
+                                                           # chunker or embedding change
+docker compose exec worker python -m eval.seed --no-embed  # skip embedding — fast, for
+                                                           # chunker-only iteration
+docker compose exec worker python -m eval.run              # recall@5 / recall@20 scoreboard
+docker compose exec worker python -m eval.run --legs lexical            # ablate a leg out
+docker compose exec worker python -m eval.run --legs lexical,semantic   # explicit, both
 ```
 
 The eval runs in `worker`, not `api` — it needs `git`, the DB, and the `.env` file, and
 `worker` is the only service with all three. Chunks and embeddings are built at *index*
 time, not query time, so changing how either works means re-seeding before the numbers mean
 anything.
+
+**`--force` is now a genuinely slow operation** (M6) — it re-embeds every chunk in all 3
+repos, and the free tier's embedding quota (100 requests/min, **1,000/day** — see
+`STACK.md`) makes this minutes, not seconds. It's resumable (safe to re-run the same command
+after a quota error — it picks up `WHERE embedding IS NULL`), and `--no-embed` skips the
+embedding step entirely when only the chunker changed and lexical-only numbers are enough.
 
 ## Notes
 

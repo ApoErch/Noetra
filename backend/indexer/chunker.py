@@ -142,7 +142,7 @@ def _make_chunk(
 
     A bare function body is ambiguous — `def refresh(self, token)` could be a cache, a
     session, or OAuth. The prefix says which, which is why it (not the raw source) is what
-    gets indexed and, in M7, embedded. This pattern is called contextual retrieval.
+    gets indexed and embedded (M6). This pattern is called contextual retrieval.
     """
     body = "\n".join(lines[start_line - 1 : end_line])
     prefix = _PREFIX_SEPARATOR.join(part for part in (path, enclosing_class, signature) if part)

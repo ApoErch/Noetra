@@ -68,11 +68,22 @@ from the other two, and direct agent tools. See below.
   **pgvector's HNSW caps the `vector` type at 2000 dims** — 3072 would force `halfvec`.
 - **Only 3072 is pre-normalized.** At 1536 we L2-normalize client-side or cosine distance is
   silently wrong — degraded recall with no error to catch it.
-- **Input caps at 2048 tokens** (~8 KB). Some leaf-entity chunks exceed this, so `core/ai`
-  truncates before sending.
+- **Input caps at 2048 tokens.** Google's own "~4 chars/token" figure is measured on
+  English prose; source code is punctuation- and symbol-dense (`self.foo["bar"]` has far
+  more token-boundary characters per length than a sentence), so it tokenizes denser.
+  `core/ai` truncates at **2.5 chars/token (~5 KB)**, not 4, so a long chunk is cut before
+  the model's real limit rather than after it with no error to say so.
 - **`task_type` is asymmetric.** Index with `RETRIEVAL_DOCUMENT`; query with
   **`CODE_RETRIEVAL_QUERY`** — Google's purpose-built "natural language → code block" mode,
   exactly this product's query shape. Using one task type for both sides is a quiet mistake.
+- **Free tier has two separate quotas, not one.** `embed_content` is capped at **100
+  requests/minute *and* 1,000 requests/day** (`generativelanguage.googleapis.com/embed_content_free_tier_requests`)
+  — both discovered by hitting them live, not from published docs. The per-minute one is
+  what pacing (`worker/embedding.py`'s sleep between pages) and retry (`core/ai`'s
+  `HttpRetryOptions`) exist for. The **daily** one is different in kind: no amount of
+  backoff or waiting a few minutes recovers it, and Google's `retryDelay` hint (often a few
+  seconds) is misleading when *this* is the quota that's actually exhausted — it looks
+  identical to a recoverable per-minute 429 unless you inspect the error's `quotaId`.
 
 ## Chunking rule (non-negotiable)
 
@@ -227,8 +238,16 @@ Legs get built one at a time, and **each ends with a measured `recall@k` delta**
 |---|---|---|
 | Lexical | **M5** ✅ | trivial — one migration |
 | ~~Structural v1 (trigram)~~ | M4 → **removed after M5 measurement** | trivial |
-| Semantic (embeddings) | **M6** | **re-embed the entire corpus** |
+| Semantic (embeddings) | **M6** ✅ code, ⏳ measurement | **re-embed the entire corpus** |
 | Graph (call + import edges) | **M7** | re-parse + re-resolve; no API cost |
+
+**M6's recall delta is not final yet.** The code is built and verified working (provider
+seam, normalization, asymmetry, resumability all confirmed), but the free tier's **daily**
+embedding quota (1,000 requests) was exhausted mid-measurement, and the failure mode is
+silent: `search()` degrades a failed semantic call to lexical-only rather than erroring, so
+a quota-starved eval run *looks* like a normal one — it just quietly measures less semantic
+contribution than the leg actually has. Don't quote a semantic/fused number until a full
+run completes with all 3 eval repos fully embedded and no quota errors during scoring.
 
 **Semantic is no longer conditional.** It was gated on "only if the eval proves lexical is
 failing" because embeddings were expensive to build *and* to redo. At $0 the cost half of that

@@ -92,7 +92,17 @@ everything, and a repo stuck part-way through still answers lexical search corre
 resolution over data `parsing` already produced, so there's no reason for it to sit behind
 the slowest stage.
 
-On any failure: `status=failed`, store the error, surface a retry action.
+On any failure in `cloning` through `chunking`: `status=failed`, store the error, surface a
+retry action — these stages are deterministic and local, so a failure means the repo really
+is broken.
+
+**`embedding` is the one exception, deliberately.** It's the first stage that can fail for
+reasons that have nothing to do with the repo — a quota limit, not a bug. A failure there is
+caught, logged, and leaves `status=embedding` rather than `failed`: the repo stays exactly as
+searchable as it was (lexical still works, chat doesn't exist until `ready`), and a later
+retry resumes via `WHERE embedding IS NULL` instead of needing a full re-index. Marking it
+`failed` would have made `retry_repository`'s existing cleanup delete every `File` row —
+cascading away every embedding already paid for — over what's often just a rate limit.
 
 ## Stage responsibilities
 

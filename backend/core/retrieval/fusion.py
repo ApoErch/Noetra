@@ -22,8 +22,8 @@ def reciprocal_rank_fusion(
     semantic leg's cosine similarity) never have to be put on a common scale.
     A location that ranks well in several lists rises; dedup unions the source retrievers.
 
-    Currently unused — retrieval is lexical-only (see core/retrieval/__init__.py). Wired
-    back in once the M7 semantic leg ships.
+    Called from core/retrieval/__init__.py::search() whenever both the lexical and
+    semantic (M6) legs run. M7's graph leg joins this same fusion as a third ranked list.
     """
     scores: dict[_Key, float] = defaultdict(float)
     merged: dict[_Key, RetrievalHit] = {}
