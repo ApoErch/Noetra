@@ -12,6 +12,7 @@ from core.db import SessionLocal
 from core.models import Repository, RepositoryStatus, User
 from core.security import decrypt_token
 from eval.repos import EVAL_REPOS, EvalRepo
+from worker.embedding import embed_repository
 from worker.indexing import index_repository_files
 
 # Fixed namespace so the eval user and each repo get deterministic UUIDs — re-running
@@ -80,7 +81,7 @@ def _clone_at_sha(repo: EvalRepo, dest: Path, token: str | None) -> None:
     subprocess.run(["git", "-C", str(dest), "checkout", "-q", repo.sha], check=True)
 
 
-def seed(force: bool = False) -> None:
+def seed(force: bool = False, no_embed: bool = False) -> None:
     """Index every pinned eval repo into the database under the synthetic eval user (idempotent)."""
     db = SessionLocal()
     try:
@@ -89,7 +90,13 @@ def seed(force: bool = False) -> None:
             repo_id = eval_id(repo_def.key)
             existing = db.get(Repository, repo_id)
             if existing is not None and not force:
-                print(f"skip {repo_def.key}: already seeded (use --force to reseed)")
+                print(f"skip {repo_def.key}: already indexed (use --force to reseed)")
+                # Still resume embedding even without --force — embed_repository selects
+                # WHERE embedding IS NULL, so re-running after an interrupted seed (a
+                # 429, a killed process) continues instead of needing a full reseed.
+                if not no_embed:
+                    embedded = embed_repository(db, existing)
+                    print(f"  embedded {embedded} more chunk(s)" if embedded else "  embeddings already complete")
                 continue
 
             try:
@@ -126,17 +133,29 @@ def seed(force: bool = False) -> None:
                     db.delete(stuck)
                     db.commit()
                 raise
-            print(f"  done: {repo_def.key} indexed (status={repo.status.value})")
+            print(f"  indexed: {repo_def.key} (status={repo.status.value})")
+
+            # Deliberately outside the try/except above: an indexing failure means the
+            # repo really is broken (delete and retry from scratch is correct), but an
+            # embedding failure (rate limit, quota) shouldn't wipe a repo that's already
+            # fully chunked and searchable. Left unembedded, it just resumes above on the
+            # next --force-less run.
+            if not no_embed:
+                embedded = embed_repository(db, repo)
+                print(f"  embedded: {repo_def.key} ({embedded} chunks)")
     finally:
         db.close()
 
 
 def main() -> None:
-    """CLI entry point: `python -m eval.seed [--force]`."""
+    """CLI entry point: `python -m eval.seed [--force] [--no-embed]`."""
     parser = argparse.ArgumentParser(description="Seed the pinned eval repos into the database.")
     parser.add_argument("--force", action="store_true", help="delete and re-index repos already seeded")
+    parser.add_argument(
+        "--no-embed", action="store_true", help="skip embedding — for fast chunker-only iteration"
+    )
     args = parser.parse_args()
-    seed(force=args.force)
+    seed(force=args.force, no_embed=args.no_embed)
 
 
 if __name__ == "__main__":
