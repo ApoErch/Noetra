@@ -12,6 +12,7 @@ from core.db import SessionLocal
 from core.models import Repository, RepositoryStatus, User
 from core.redis_client import release_index_lock
 from core.security import decrypt_token
+from worker.embedding import embed_repository
 from worker.indexing import index_repository_files
 
 CLONE_TIMEOUT_SECONDS = 300
@@ -100,11 +101,27 @@ def clone_repository(repository_id: str) -> None:
 
         # Everything from here — file walk, parsing, graphing, chunking, and the
         # matching status transitions — is the shared indexing core, so the eval
-        # seed indexes repos through the exact same code path. Embedding/metrics
-        # don't exist yet, so status stays at CHUNKING (the last stage actually
-        # completed) rather than jumping to READY, which is reserved for "chat +
-        # full hybrid search + metrics all unlocked" (docs/WORKFLOW.md).
+        # seed indexes repos through the exact same code path. Metrics doesn't
+        # exist yet, so status stops advancing after embedding rather than
+        # jumping to READY, which is reserved for "chat + full hybrid search +
+        # metrics all unlocked" (docs/WORKFLOW.md).
         index_repository_files(db, repo, dest)
+
+        # Embedding is the first stage that can fail for reasons that are not the
+        # repo's fault (a rate limit, a quota blip) rather than something really
+        # wrong with the repo. Every earlier stage is deterministic and local, so
+        # letting its exception hit the `except` below and mark the repo FAILED is
+        # correct there — it would not be correct here, since it would brick a
+        # repo that is already fully chunked and perfectly lexically searchable.
+        # So: catch it, log it, leave status=EMBEDDING (set at entry to
+        # embed_repository) rather than re-raising. `WHERE embedding IS NULL`
+        # makes a retry resumable, and search() gates the semantic leg on having
+        # embedded chunks, not on status, so lexical search keeps working either way.
+        try:
+            embed_repository(db, repo)
+        except Exception:
+            db.rollback()
+            logger.exception("repo %s: embedding stage failed, leaving status=EMBEDDING", repository_id)
 
         logger.info("repo %s: full pipeline took %.2fs", repository_id, time.perf_counter() - task_start)
     except Exception as exc:
