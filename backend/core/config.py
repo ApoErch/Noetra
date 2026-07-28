@@ -17,9 +17,19 @@ class Settings(BaseSettings):
     github_oauth_callback: str = "http://localhost:8000/api/v1/auth/callback"
     frontend_url: str = "http://localhost:5173"
 
+    gemini_api_key: str = ""
+    gemini_chat_model: str = "gemini-3.5-flash"
+    gemini_embedding_model: str = "gemini-embedding-001"
+    gemini_embedding_dimensions: int = 1536
+
+    # Embeddings stay Gemini-only (Anthropic has no embedding API). Chat gets a per-provider
+    # key/model pair each so core/ai/chat.py's get_chat_model(provider) can build any of the
+    # three on demand — used for testing the M8 agent against a different model.
+    default_chat_provider: str = "gemini"  # "gemini" | "openai" | "anthropic"
+    openai_api_key: str = ""
+    openai_chat_model: str = "gpt-4o-mini"
     anthropic_api_key: str = ""
-    embedding_provider: str = ""
-    embedding_api_key: str = ""
+    anthropic_chat_model: str = "claude-sonnet-5"
 
     session_secret: str = ""
     token_encryption_key: str = ""
