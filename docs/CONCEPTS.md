@@ -1470,4 +1470,48 @@ here is the same reason ensemble methods generally prefer *independent* models: 
 errors don't cancel out the way independent ones do, which is precisely what RRF over
 independent retrievers is designed to exploit.
 
+---
+
+## Pacing vs. backoff, and two different rate limits (M6)
+
+**What it is:** two different ways of not overwhelming an API, that look similar but solve
+different problems. **Backoff** *reacts*: you send a request, get told "too many, slow down"
+(HTTP 429), and wait before retrying — usually waiting a bit longer each retry (exponential
+backoff). **Pacing** *avoids the problem in the first place*: you deliberately sleep a fixed
+amount between requests you were always going to send, so you never send fast enough to get
+told to slow down.
+
+**Why we need it here:** embedding a repo can mean hundreds of API calls to Gemini in a row.
+Google's free tier caps `embed_content` at **100 requests/minute** — fire calls back-to-back
+with no delay and you blow past that in seconds, even though the total work is well within
+budget spread over a minute. `worker/embedding.py` sleeps 2 seconds between chunk pages
+(pacing); `core/ai/embeddings.py`'s client also retries with backoff for whatever pacing
+doesn't fully prevent (another process sharing the same key, a burst at just the wrong
+moment). They're complementary, not redundant — pacing is the everyday behavior, backoff is
+the safety net.
+
+**The gotcha that cost real debugging time:** Google's free tier turned out to have a
+*second*, separate quota — **1,000 requests/day**, not just the 100/minute one. Backoff
+tuned to survive a per-minute limit (wait up to ~60s) is useless against a per-day limit
+that's already exhausted; no reasonable wait fixes it. Worse, the error's `retryDelay` hint
+looked identical either way (a few seconds) — the two are only distinguishable by reading
+the error's `quotaId` field (`...PerMinute...` vs `...PerDay...`). We only found this by
+deliberately checking the raw, un-retried error message instead of assuming a 429 always
+meant the same thing.
+
+**How it's used in Noetra:** `worker/embedding.py`'s `_PACE_SECONDS` sleep + `core/ai`'s
+`HttpRetryOptions(attempts=9, ...)` handle the per-minute limit. The per-day limit currently
+has no code-level handling — it just means a real quota wall shows up once a day's testing
+volume is used, documented in `STACK.md`/`RETRIEVAL.md` as an operational fact to know about
+rather than something engineered around yet.
+
+**Is this standard?** Yes — pacing (a.k.a. client-side throttling / rate limiting) and
+backoff are both standard, complementary techniques for talking to any rate-limited API.
+Multiple quota tiers on the same endpoint (per-minute *and* per-day) is also common practice
+for API providers — always worth checking an error's specific quota metric rather than
+assuming which limit was hit.
+
+**Docs:** [Gemini API rate limits](https://ai.google.dev/gemini-api/docs/rate-limits) ·
+[Exponential backoff and jitter (AWS Builders' Library)](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/)
+
 **Docs:** [Reciprocal Rank Fusion (original paper, Cormack et al. 2009)](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)

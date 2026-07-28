@@ -343,3 +343,32 @@ pipeline stage, and `semantic_search()` fused via the already-written (currently
   that still looks like it's fusing.
 - Docker services' running state from the prior session was not touched or verified this
   session (no code/containers were run — this was a docs-only session).
+
+---
+
+## Session — 2026-07-28 22:23
+
+**Worked on:** Milestone 6 (Gemini provider layer + semantic retrieval leg), per `docs/PLAN.md`. Code complete and committed; the milestone's own "measured recall delta" deliverable is not — blocked mid-run by the free tier's daily embedding quota.
+**Done:**
+- Pinned the baseline before touching anything: `eval.run` reproduced the documented **0.72/0.78** exactly.
+- `core/config.py`: removed dead `anthropic_api_key`/`embedding_provider`/`embedding_api_key`; added `gemini_*` settings plus (user-requested, ahead of M8) a `default_chat_provider` + per-provider OpenAI/Anthropic keys.
+- New `core/ai/` package: `embeddings.py` (`embed_documents`/`embed_query` — cached `genai.Client` with retry, per-text truncation at a deliberately conservative 2.5 chars/token for code, client-side L2 normalization, token-budget batch packing) and `chat.py` (`get_chat_model(provider)` — a factory returning a ready LangChain chat model for gemini/openai/anthropic, for testing the M8 agent later).
+- Migration `b3f4c9a1d2e6`: `CREATE EXTENSION vector` + `chunks.embedding vector(1536)`, nullable, **no ANN index** (deliberate reversal of the old plan — see Decision 3 in `docs/PLAN.md`). Applied; verified `pgvector 0.8.5` active.
+- `worker/embedding.py`: `embed_repository()` — resumable (`WHERE embedding IS NULL`), paced (sleep between pages), timed. Wired into `clone_repository`; embedding failures are caught and leave `status=EMBEDDING`, never `FAILED` (closes a real data-loss path — `retry_repository` only bulk-deletes `File` rows on `FAILED`).
+- `core/retrieval/semantic.py` + fusion wiring in `__init__.py`: `search()` now fuses lexical + semantic via RRF, gated on data (has-embedded-chunks) not status, degrades gracefully if the semantic call fails, re-applies the per-file cap after fusion.
+- `eval/run.py --legs` and `eval/seed.py`'s embed step (resumable, `--no-embed`, non-fatal per-repo — this last one a real bug found and fixed mid-session: the first `--force` run crashed the whole seed on repo 1 of 3 over one repo's quota failure).
+- Reconciled 9 docs (`DATA_MODEL`, `RETRIEVAL`, `STACK`, `WORKFLOW`, `SETUP`, `BUILD_ORDER`, `ARCHITECTURE`, `FEATURES`, `CONCEPTS`) with what actually got built, including a corrected HNSW section in `CONCEPTS.md` (appended, not rewritten, per that file's existing correction pattern).
+- All of the above committed in 10 small, working increments.
+**In progress:** The actual recall measurement. DB state right now: `noetra` fully embedded (248/248), `requests` partial (600/1040), `zod` untouched (0/3563). A preliminary run showed the `conceptual` bucket moving +0.07 (met the stated bar) but is **not trustworthy** — confirmed live that `search()`'s silent semantic-failure fallback was firing during it, so some unknown fraction of the 46 questions silently lost their semantic leg to quota exhaustion instead of genuinely testing it.
+**Key decisions:**
+- No ANN index in V1 (exact cosine scan) — the per-file cap already forces a full sort, and a plain HNSW/IVFFlat index would silently under-return once `WHERE repository_id =` filters after the fact.
+- Embedding failure is non-fatal by design — a quota blip isn't the repo's fault and shouldn't brick an otherwise fully-searchable repo.
+- Chat provider factory built now even though M8 doesn't exist yet — explicit user request, not built ahead of need for its own sake.
+- Truncation/batching use 2.5 chars/token, not Google's commonly-cited ~4 — that figure is measured on English prose; code is punctuation-dense and tokenizes denser. Verified via Google's own docs rather than taking either side's assertion at face value.
+- Retry attempts bumped 5→9 after a live 429 proved 5 attempts' backoff (~31s) fell short of the server's actual 42s suggested delay.
+**Next step:** Once the free tier's daily embedding quota resets (or billing is enabled): re-run `eval.seed --force` (resumes cleanly from current partial state), then `eval.run --legs lexical` (must still equal 0.72/0.78 exactly) and `--legs lexical,semantic` for the real fused number. Worth adding fallback-failure logging to `search()` first, so that run can report how many questions actually exercised semantic vs. silently fell back. Then Step 8 (routing) and the final verification pass — both deliberately still unstarted, since the plan makes them depend on a real measurement.
+**Watch out for:**
+- **Free tier has two separate quotas** — 100 requests/minute *and* **1,000/day** — discovered by hitting both live. The daily one doesn't recover on any short wait, and Google's `retryDelay` hint is misleadingly short either way; only the error's `quotaId` field tells them apart.
+- **`search()`'s semantic-leg failure is silent by design** (degrades to lexical, no error, no log). Correct for production, but means no eval number from a quota-exhausted window can be trusted — always sanity-check with one direct `embed_query()` call before trusting a semantic/fused eval run.
+- Docker images were rebuilt this session for the new deps (`google-genai`, `pgvector`, `langchain-*`) — a plain restart won't pick up any *future* `pyproject.toml` change; needs `docker compose build api worker` again.
+- `.env` now has a real `GEMINI_API_KEY` filled in by the user directly (never passed through chat) — confirmed still gitignored, not committed.
