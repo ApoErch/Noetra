@@ -34,7 +34,11 @@ def _client() -> genai.Client:
     return genai.Client(
         api_key=settings.gemini_api_key,
         http_options=types.HttpOptions(
-            retry_options=types.HttpRetryOptions(attempts=5, initial_delay=1.0, max_delay=65.0)
+            # attempts=5 with exp_base=2's default 1,2,4,8,16s backoff only reaches ~31s
+            # cumulative — measured against a real 429 whose server-suggested retryDelay
+            # was 42s, so 5 attempts burned out mid-window. 9 attempts (1,2,4,8,16,32,64,
+            # 65,65 — capped at max_delay) comfortably spans past a full 60s quota window.
+            retry_options=types.HttpRetryOptions(attempts=9, initial_delay=1.0, max_delay=65.0)
         ),
     )
 

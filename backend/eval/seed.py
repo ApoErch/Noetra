@@ -82,6 +82,28 @@ def _clone_at_sha(repo: EvalRepo, dest: Path, token: str | None) -> None:
     subprocess.run(["git", "-C", str(dest), "checkout", "-q", repo.sha], check=True)
 
 
+def _embed_repo(db: Session, repo: Repository, key: str) -> None:
+    """Embed a repo's chunks and print progress; non-fatal on failure.
+
+    Mirrors worker/tasks.py's production handling: an embedding failure (quota, rate
+    limit) shouldn't kill the whole seed run over one repo — print it and move on. The
+    repo stays fully lexically searchable, and WHERE embedding IS NULL means a later
+    re-run (even without --force) picks up wherever this one stopped.
+    """
+    embed_start = time.perf_counter()
+    try:
+        embedded = embed_repository(db, repo)
+    except Exception as exc:
+        db.rollback()
+        print(f"  embedding failed for {key}: {exc}")
+        return
+    elapsed = time.perf_counter() - embed_start
+    if embedded:
+        print(f"  embedded {embedded} chunk(s) for {key} in {elapsed:.1f}s")
+    else:
+        print(f"  {key}: embeddings already complete")
+
+
 def seed(force: bool = False, no_embed: bool = False) -> None:
     """Index every pinned eval repo into the database under the synthetic eval user (idempotent)."""
     db = SessionLocal()
@@ -96,14 +118,7 @@ def seed(force: bool = False, no_embed: bool = False) -> None:
                 # WHERE embedding IS NULL, so re-running after an interrupted seed (a
                 # 429, a killed process) continues instead of needing a full reseed.
                 if not no_embed:
-                    embed_start = time.perf_counter()
-                    embedded = embed_repository(db, existing)
-                    elapsed = time.perf_counter() - embed_start
-                    print(
-                        f"  embedded {embedded} more chunk(s) in {elapsed:.1f}s"
-                        if embedded
-                        else "  embeddings already complete"
-                    )
+                    _embed_repo(db, existing, repo_def.key)
                 continue
 
             try:
@@ -148,10 +163,7 @@ def seed(force: bool = False, no_embed: bool = False) -> None:
             # fully chunked and searchable. Left unembedded, it just resumes above on the
             # next --force-less run.
             if not no_embed:
-                embed_start = time.perf_counter()
-                embedded = embed_repository(db, repo)
-                elapsed = time.perf_counter() - embed_start
-                print(f"  embedded: {repo_def.key} ({embedded} chunks in {elapsed:.1f}s)")
+                _embed_repo(db, repo, repo_def.key)
     finally:
         db.close()
 
