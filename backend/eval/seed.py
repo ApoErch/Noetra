@@ -2,6 +2,7 @@ import argparse
 import base64
 import os
 import subprocess
+import time
 import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -95,8 +96,14 @@ def seed(force: bool = False, no_embed: bool = False) -> None:
                 # WHERE embedding IS NULL, so re-running after an interrupted seed (a
                 # 429, a killed process) continues instead of needing a full reseed.
                 if not no_embed:
+                    embed_start = time.perf_counter()
                     embedded = embed_repository(db, existing)
-                    print(f"  embedded {embedded} more chunk(s)" if embedded else "  embeddings already complete")
+                    elapsed = time.perf_counter() - embed_start
+                    print(
+                        f"  embedded {embedded} more chunk(s) in {elapsed:.1f}s"
+                        if embedded
+                        else "  embeddings already complete"
+                    )
                 continue
 
             try:
@@ -141,8 +148,10 @@ def seed(force: bool = False, no_embed: bool = False) -> None:
             # fully chunked and searchable. Left unembedded, it just resumes above on the
             # next --force-less run.
             if not no_embed:
+                embed_start = time.perf_counter()
                 embedded = embed_repository(db, repo)
-                print(f"  embedded: {repo_def.key} ({embedded} chunks)")
+                elapsed = time.perf_counter() - embed_start
+                print(f"  embedded: {repo_def.key} ({embedded} chunks in {elapsed:.1f}s)")
     finally:
         db.close()
 

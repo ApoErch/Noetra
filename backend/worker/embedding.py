@@ -29,6 +29,7 @@ def embed_repository(db: Session, repo: Repository) -> int:
     repo.status = RepositoryStatus.EMBEDDING
     db.commit()
 
+    stage_start = time.perf_counter()
     total = 0
     while True:
         chunks = db.scalars(
@@ -39,13 +40,18 @@ def embed_repository(db: Session, repo: Repository) -> int:
         if not chunks:
             break
 
+        page_start = time.perf_counter()
         vectors = embed_documents([chunk.embed_text for chunk in chunks])
         for chunk, vector in zip(chunks, vectors):
             chunk.embedding = vector
         db.commit()  # per-page commit — a crash mid-repo keeps every page already done
 
         total += len(chunks)
-        logger.info("repo %s: embedded %d chunks (%d so far)", repo.id, len(chunks), total)
+        logger.info(
+            "repo %s: embedded %d chunks in %.2fs (%d so far)",
+            repo.id, len(chunks), time.perf_counter() - page_start, total,
+        )
         time.sleep(_PACE_SECONDS)
 
+    logger.info("repo %s: embedding stage took %.2fs (%d chunks)", repo.id, time.perf_counter() - stage_start, total)
     return total
