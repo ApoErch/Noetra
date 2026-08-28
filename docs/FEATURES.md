@@ -43,6 +43,10 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
   built from tool-result metadata, never from what the model says it read.
 - Stream tool-call status alongside tokens ("searching `TokenService`… reading
   `auth/tokens.py`…"). An agent loop takes seconds; silence during it reads as a hang.
+- Two cheap hallucination guards, no extra model calls: a retrieval grade discards junk tool
+  results before they reach the model, and a citation-verification node strips any
+  `file:line` in the final answer that isn't backed by a real retrieval hit from that turn.
+  See `RETRIEVAL.md`.
 - Build note: ships **directly as the agent** (milestone 8) — there is no single-shot RAG
   version. Once the retrievers are already exposed as tools, the multi-step loop is a small
   amount of code on top of them, and a single-shot version would be deleted a week later.

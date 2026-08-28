@@ -89,6 +89,15 @@ Per-milestone writeups live in `LEARNING_LOG.md`.
    Streamed over SSE with tool-call status, citations built from tool-result metadata. Chat
    UI reuses the existing citation → Monaco overlay path. Extends `eval/run.py` to score
    agent-mediated retrieval (resumable — free-tier chat quota makes a full run a day's work).
+   - **Two hallucination-mitigation steps, both cheap.** A CRAG-style retrieval grade runs
+     right after each tool call, before that result reaches the model: junk/irrelevant tool
+     output triggers a re-search instead of being handed to `call_model` to generate from. A
+     citation-verification node runs right before `END`: every `file:line` in the draft
+     answer is checked against the tool-result metadata actually collected this turn, and any
+     citation that isn't backed by a real retrieval hit is dropped. Neither costs an extra
+     model call — see `RETRIEVAL.md`'s "Hallucination mitigation" section for why an
+     LLM-judge faithfulness check (a real SOTA option) is deliberately deferred until the eval
+     shows these two aren't enough.
 
 9. **Basic metrics + dashboard.** `metrics` pipeline stage; status finally reaches `READY`.
 

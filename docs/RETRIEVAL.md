@@ -226,6 +226,34 @@ knows the file and line range; carry it through and render it. Asking the model 
 something invites drift, or citing a file it reasoned about but never opened. That's the
 difference between a citation the user trusts and one they stop clicking.
 
+### Hallucination mitigation
+
+Two nodes, both cheap because neither spends an extra model call — the two are chosen
+deliberately over the more common but pricier fix of asking the LLM to grade its own answer.
+
+**1. Retrieval grading (CRAG-style), before generation.** Right after each tool call, before
+the result reaches `call_model`: does this tool result actually look relevant to the query,
+or is it noise (e.g. a search that returned nothing useful)? A poor grade triggers a
+re-search with different terms instead of letting the model generate from bad context. This
+is the corrective-RAG pattern — stop bad input from reaching the model, rather than trying to
+catch a bad answer after it's already written. Cheap because it's a rule/small-model check on
+data already in hand, not a full LLM call judging the final answer.
+
+**2. Citation verification, before `END`.** The draft answer's `file:line` citations are
+checked against the accumulated tool-result metadata for that turn — the same state node
+already collects for rendering. A citation that doesn't match a real retrieval hit (a
+plausible-looking file/line the model invented) is dropped rather than shown. This is
+structural, not semantic: it catches *fabricated* citations, not a citation that's real but
+doesn't actually support the sentence next to it.
+
+**Deliberately deferred: LLM-judge / NLI faithfulness scoring.** The more thorough SOTA
+version (Self-RAG-style reflection, or a small NLI entailment model checking each claim
+against its source) catches the subtler case above, but costs either a fine-tuned model or
+another model call per answer — real latency and quota on a free tier already tight per
+`STACK.md`. Same discipline as the rest of this doc: ship the cheap version, measure how often
+real-but-unsupported citations actually occur against `eval/run.py`'s agent-mediated scoring,
+and only add the expensive check if that number justifies it.
+
 There is no single-shot RAG version. It's tempting to think "one retrieval call, no loop" is
 the simpler first step, but once retrievers are exposed as tools the loop is a handful of lines
 on top — and the single-shot version would be thrown away immediately. Ship the agent.
