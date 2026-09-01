@@ -1,9 +1,4 @@
-# Noetra — Engineering Intelligence Platform
-
-Point Noetra at a GitHub repo → it clones, indexes, and lets you **chat with and
-search** the codebase through an AI agent that answers with exact file + line
-citations. Grounded QA over a codebase is the product. **Retrieval quality is the
-whole game**.
+See @README.md for project overview
 
 # Workflow
 

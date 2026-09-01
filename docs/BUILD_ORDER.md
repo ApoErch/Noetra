@@ -32,7 +32,10 @@ a *gate* and goes back to being a *scoreboard*.
 ## Status
 
 **Done:** M1 Skeleton · M2 Auth · M3 Import + clone · M4 Parse + extract · M5 Eval + hybrid
-search + AST chunking. **Next up: M6.**
+search + AST chunking. **M6 (Gemini provider layer + semantic leg): code complete, recall
+delta not yet measured** — the free tier's daily embedding quota (1,000 requests) was
+exhausted mid-measurement; needs one clean full re-seed + eval run once quota resets or
+billing is enabled. **Next up: finish M6's measurement, then M7.**
 
 Per-milestone writeups live in `LEARNING_LOG.md`.
 
@@ -60,12 +63,16 @@ Per-milestone writeups live in `LEARNING_LOG.md`.
      0.72 / `recall@20` 0.78**. (0.76 / 0.81 was the pre-removal hybrid number — don't quote
      it as the current one.)
 
-6. **Gemini provider layer + the semantic leg.** `core/ai` (the only module that imports the
-   Gemini SDK) with a batched, rate-limited, resumable embedding client. Then
-   `chunk.embedding vector(1536)` + an HNSW index, an `embedding` pipeline stage, and
+6. ~~**Gemini provider layer + the semantic leg.**~~ **Code done, measurement pending.**
+   `core/ai` (the only module that imports any provider SDK — Gemini for embeddings, plus a
+   switchable chat factory covering OpenAI/Anthropic for M8 testing) with a batched,
+   rate-limited, resumable embedding client. `chunk.embedding vector(1536)` — **no index**
+   in V1, exact cosine scan instead (see `DATA_MODEL.md`'s deferred-and-why) — an
+   `embedding` pipeline stage (non-fatal on failure, see `WORKFLOW.md`), and
    `semantic_search()` fused with lexical via the RRF already written in `fusion.py`.
-   Chunking shipped in M5, so what remains here is purely the embedding leg.
-   **Ends with a measured recall delta against the pinned lexical-only baseline.**
+   Chunking shipped in M5, so this was purely the embedding leg.
+   **Ends with a measured recall delta against the pinned lexical-only baseline** — blocked
+   for now on the free tier's daily embedding quota; see `RETRIEVAL.md`.
 
 7. **The graph leg.** Call-graph extraction — a second Tree-sitter walk that *does* descend
    into function bodies (the existing one deliberately stops there), resolving callee names

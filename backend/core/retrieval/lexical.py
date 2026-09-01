@@ -6,19 +6,12 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from core.models import Chunk, File
-from core.retrieval.types import RetrievalHit, RetrieverSource
+from core.retrieval.types import MAX_CHUNKS_PER_FILE, RetrievalHit, RetrieverSource
 
 _WORD_RE = re.compile(r"\w+")
 # websearch_to_tsquery keywords that are query operators, not real search terms — they'd
 # be re-read as operators if we echoed them back into a relaxed query.
 _OPERATOR_WORDS = {"or", "and"}
-
-# Most chunks one file may contribute to a result list. Without this, a single large,
-# loosely-matching file fills every slot with its own chunks and crowds out the file that
-# actually holds the answer — measurably worse recall, since a caller who never sees a file
-# cannot recover it. Elasticsearch calls this collapsing; the general idea is to trade a
-# little relevance for result diversity.
-_MAX_CHUNKS_PER_FILE = 2
 
 # ts_rank multiplier for files that aren't source (`file.language IS NULL` — markdown, rst,
 # JSON, LICENSE). An english-config tsvector scores English prose far above code for any
@@ -62,7 +55,7 @@ def lexical_search(
         db, repository_id, search_text=relaxed, lexemes=lexemes, limit=limit
     ):
         key = (hit.file_id, hit.start_line, hit.end_line)
-        if key in seen or per_file[hit.file_id] >= _MAX_CHUNKS_PER_FILE:
+        if key in seen or per_file[hit.file_id] >= MAX_CHUNKS_PER_FILE:
             continue
         hits.append(hit)
         per_file[hit.file_id] += 1
@@ -139,7 +132,7 @@ def _ranked_chunks(
     )
     stmt = (
         select(ranked)
-        .where(ranked.c.per_file_rank <= _MAX_CHUNKS_PER_FILE)
+        .where(ranked.c.per_file_rank <= MAX_CHUNKS_PER_FILE)
         .order_by(ranked.c.rank.desc())
         .limit(limit)
     )

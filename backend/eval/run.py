@@ -13,19 +13,32 @@ from sqlalchemy.orm import Session
 from core.db import SessionLocal
 from core.models import File
 from core.retrieval import search
+from core.retrieval.types import RetrieverSource
 from eval.repos import EVAL_REPOS_BY_KEY
 from eval.seed import eval_id
+
+_LEG_NAMES = {"lexical": RetrieverSource.LEXICAL, "semantic": RetrieverSource.SEMANTIC}
+
+
+def parse_legs(raw: str | None) -> tuple[RetrieverSource, ...] | None:
+    """Parse `--legs lexical,semantic` into what search() expects; None (both legs) if unset."""
+    if raw is None:
+        return None
+    try:
+        return tuple(_LEG_NAMES[name.strip()] for name in raw.split(","))
+    except KeyError as exc:
+        raise ValueError(f"unknown leg {exc.args[0]!r} — choose from {sorted(_LEG_NAMES)}") from exc
 
 _QUESTIONS_PATH = Path(__file__).parent / "questions.yaml"
 
 # The cutoffs the scoreboard reports. 5 is "what the user sees without scrolling";
-# 20 is "what the M6 agent can afford to read" — a retriever that only clears @20 is
+# 20 is "what the M8 agent can afford to read" — a retriever that only clears @20 is
 # still usable by the agent but not by the search UI.
 _KS = (5, 20)
 
 
 class QuestionKind(str, enum.Enum):
-    """What kind of retrieval a question exercises — the breakdown that decides whether M7 is built."""
+    """What kind of retrieval a question exercises — the breakdown the M6/M7 leg measurements are scored by."""
 
     SYMBOL = "symbol"  # names an identifier that exists verbatim; lexical's job too, just a distinct shape of query
     KEYWORD = "keyword"  # words that literally appear in the source; lexical's job
@@ -122,9 +135,14 @@ def validate_answers(db: Session, questions: list[EvalQuestion]) -> list[str]:
     return problems
 
 
-def evaluate_question(db: Session, question: EvalQuestion, repo_id: uuid.UUID) -> QuestionResult:
+def evaluate_question(
+    db: Session,
+    question: EvalQuestion,
+    repo_id: uuid.UUID,
+    legs: tuple[RetrieverSource, ...] | None = None,
+) -> QuestionResult:
     """Run one question through core.retrieval and record where the first correct hit ranked."""
-    hits = search(db, repo_id, question.query, limit=max(_KS))
+    hits = search(db, repo_id, question.query, limit=max(_KS), legs=legs)
 
     file_rank: int | None = None
     line_rank: int | None = None
@@ -181,8 +199,8 @@ def report(results: list[QuestionResult]) -> None:
     for repo_key, subset in sorted(by_repo.items()):
         print(_format_row(repo_key, subset))
 
-    # The miss list is the working input to M7: if embeddings are ever built, these are
-    # the questions they have to fix to justify the cost.
+    # The miss list is the working input to whichever leg builds next (M7's graph leg) —
+    # these are the questions it has to fix to justify the cost.
     misses = [r for r in results if r.line_rank is None or r.line_rank > max(_KS)]
     print(f"\nmisses — no correct location in top {max(_KS)} ({len(misses)}/{len(results)})")
     for result in misses:
@@ -190,7 +208,7 @@ def report(results: list[QuestionResult]) -> None:
         print(f"  [{result.question.kind.value}/{result.question.repo}] {result.question.query}{wrong_line}")
 
 
-def run(questions_path: Path = _QUESTIONS_PATH) -> None:
+def run(questions_path: Path = _QUESTIONS_PATH, legs: tuple[RetrieverSource, ...] | None = None) -> None:
     """Score every pinned question against the seeded repos and print the scoreboard."""
     questions = load_questions(questions_path)
     db = SessionLocal()
@@ -202,18 +220,24 @@ def run(questions_path: Path = _QUESTIONS_PATH) -> None:
                 print(f"  {problem}")
             raise SystemExit(1)
 
-        results = [evaluate_question(db, q, eval_id(q.repo)) for q in questions]
+        results = [evaluate_question(db, q, eval_id(q.repo), legs) for q in questions]
     finally:
         db.close()
+
+    ran = [leg.value for leg in legs] if legs is not None else [leg.value for leg in RetrieverSource]
+    print(f"legs: {', '.join(ran)}")
     report(results)
 
 
 def main() -> None:
-    """CLI entry point: `python -m eval.run [--questions PATH]`."""
+    """CLI entry point: `python -m eval.run [--questions PATH] [--legs lexical,semantic]`."""
     parser = argparse.ArgumentParser(description="Score retrieval against the pinned eval questions.")
     parser.add_argument("--questions", type=Path, default=_QUESTIONS_PATH, help="path to questions.yaml")
+    parser.add_argument(
+        "--legs", type=str, default=None, help="comma-separated legs to run, e.g. lexical or lexical,semantic (default: both)"
+    )
     args = parser.parse_args()
-    run(args.questions)
+    run(args.questions, parse_legs(args.legs))
 
 
 if __name__ == "__main__":

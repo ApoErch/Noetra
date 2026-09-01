@@ -16,6 +16,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy import Enum as SAEnum
+from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -148,9 +149,9 @@ class Chunk(Base):
     at, whereas a chunk already knows the line range it covers. `indexer.chunker.chunk_file`
     produces one per leaf entity plus gap chunks for everything between them.
 
-    The `embedding vector(1536)` column from DATA_MODEL.md is deliberately absent — that
-    arrives with pgvector in M7, and only if the eval shows semantic retrieval earning its
-    slot. `embed_text` already holds exactly what would be embedded.
+    `embedding` is nullable on purpose: the M6 embedding stage selects
+    `WHERE embedding IS NULL`, so a 429 partway through a repo resumes instead of
+    restarting, and a repo stuck mid-embed stays lexically searchable throughout.
     """
 
     __tablename__ = "chunks"
@@ -179,6 +180,11 @@ class Chunk(Base):
         Computed("to_tsvector('english', coalesce(embed_text, ''))", persisted=True),
         nullable=True,
     )
+    # 1536 = gemini-embedding-001 truncated from its native 3072 (Matryoshka) — pgvector's
+    # HNSW index caps the `vector` type at 2000 dims, and 3072 would force `halfvec`.
+    # Explicit Vector(1536) type means the `list[float] | None` annotation is never
+    # consulted, so no `type_annotation_map` entry or `# type: ignore` is needed.
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

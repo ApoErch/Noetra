@@ -4,11 +4,17 @@ import uuid
 from pydantic import BaseModel
 
 
+# Most chunks one file may contribute to a result list. Shared by both legs (and
+# re-applied once more after fusion, in __init__.py) — each leg capping on its own
+# doesn't stop one file from taking 2 lexical + 2 semantic slots in the fused top-20.
+MAX_CHUNKS_PER_FILE = 2
+
+
 class RetrieverSource(str, enum.Enum):
     """Which retriever produced a hit; a fused hit can carry more than one."""
 
     LEXICAL = "lexical"
-    # SEMANTIC = "semantic"  # M7, conditional — the slot is reserved, unused for now
+    SEMANTIC = "semantic"
 
 
 class RetrievalHit(BaseModel):

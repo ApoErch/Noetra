@@ -702,6 +702,34 @@ at a scale where build time or memory becomes the binding constraint.
 
 ---
 
+## Correction: Noetra doesn't use HNSW after all (M6)
+
+**The earlier claim (now known wrong):** the entry above says "Why Noetra uses HNSW" as
+settled fact. When M6 actually built the semantic leg, that got reversed — **no ANN index
+at all, exact cosine search instead.**
+
+**Why the reversal:** the concepts above (IVFFlat vs. HNSW) are both about *which ANN index
+to use*, quietly assuming an ANN index is the right call at all. Two things made it not be,
+for Noetra specifically: search always filters `WHERE repository_id = X`, and pgvector's
+ANN indexes return their global top-k *before* that filter applies — a selective filter can
+silently return fewer rows than asked for (fixable in pgvector 0.8+ with
+`hnsw.iterative_scan`, but that's a version dependency and a query-time `SET LOCAL` to carry
+everywhere). And separately, the app's own per-file cap already forces a full sort over
+every matching chunk in the repo, so an ANN index would sit unused by the only query that
+ever reads `chunk.embedding`. At V1's scale (hundreds to a few thousand chunks per repo), an
+exact `<=>` scan is tens of milliseconds — faster to add than to actually need.
+
+**The general lesson, not just this case:** "which ANN index" is the wrong first question.
+The right one is *whether you're past the point where exact search stops being fast enough* —
+the **brute-force vs. ANN crossover**, roughly 10⁵ vectors per filter partition. Below that,
+exact search wins on both correctness and often latency; reaching for ANN before that point
+is the anti-pattern, not the sophisticated choice.
+
+**Docs:** `docs/DATA_MODEL.md`'s "No vector index in V1" note; the same pattern is also
+called out in `docs/RETRIEVAL.md`'s Decision 3.
+
+---
+
 ## Evaluating retrieval: `recall@k`
 
 **The problem it solves:** "the answers feel good" is not a measurement. Every retrieval
@@ -950,8 +978,8 @@ chunking, tune `k`) is guesswork and no regression can be attributed to a specif
 **How it's used in Noetra:** `backend/eval/` — `questions.yaml` (~40 questions, each with
 known answer `path`+`lines`, tagged `symbol`/`keyword`/`conceptual`), `seed.py` (indexes 3
 SHA-pinned repos), and `run.py` (runs each question through `core.retrieval.search()` and
-prints `recall@5`/`recall@20`, broken down by kind + repo). The `conceptual` row is the
-go/no-go signal for whether M7 embeddings are worth building.
+prints `recall@5`/`recall@20`, broken down by kind + repo). The `conceptual` row was the
+case for building M6's semantic (embedding) leg, and is what its recall delta is judged on.
 
 **Family:** `recall@k` is order-*unaware* (in-top-k or not). Order-aware cousins: **MRR**
 (rewards the first correct hit being near rank 1), **MAP@k**, **NDCG@k** (graded

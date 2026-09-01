@@ -55,10 +55,11 @@ pgvector keeps embeddings in the same DB — no second datastore in V1.
 
 - `core/db` — SQLAlchemy models + session.
 - `core/github` — the only place that talks to git/GitHub.
-- `core/ai` — the only place that calls Gemini (chat **and** embeddings). Nothing outside
-  this module imports the Gemini SDK. Two narrow interfaces — "generate a streamed
-  completion given messages + tools" and "embed these strings" — which is the entire cost
-  of switching providers later. This seam is worth keeping honest even with one provider,
+- `core/ai` — the only place that imports any AI provider's SDK. Embeddings are
+  Gemini-only (`embed_documents`/`embed_query`); chat is provider-switchable
+  (`get_chat_model(provider)`, default Gemini, OpenAI/Anthropic available for testing the
+  M8 agent). Two narrow interfaces — "generate a streamed completion given messages +
+  tools" and "embed these strings" — which is the entire cost of switching providers later. This seam is worth keeping honest even with one provider,
   because retrieval quality depends on the embedding model.
   It also owns everything provider-shaped that would otherwise leak outward: batching, the
   `task_type` split (`RETRIEVAL_DOCUMENT` when indexing, `CODE_RETRIEVAL_QUERY` when

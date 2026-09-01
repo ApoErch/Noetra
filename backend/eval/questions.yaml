@@ -12,8 +12,8 @@
 #                 showed only a marginal recall gain (see docs/RETRIEVAL.md).
 #   keyword     — words that literally appear in the source. Lexical (tsvector) owns these.
 #   conceptual  — the user's words appear NOWHERE in the file. Neither cheap retriever can
-#                 do anything but get lucky. This bucket is the entire case for or against
-#                 M7 embeddings: if conceptual recall is already fine, M7 never gets built.
+#                 do anything but get lucky. This bucket was the entire case for building
+#                 M6's semantic (embedding) leg, and is what its recall delta is judged on.
 #
 # Answer ranges are deliberately the enclosing definition (not one line), because a lexical
 # hit lands on one line and a structural hit spans the whole symbol — overlap accepts both.
@@ -82,7 +82,7 @@
 
 # The words below appear nowhere in the target files — "at once", "protected",
 # "strategies disagree", "too big", "went wrong" are all the user's vocabulary, not
-# the code's. This is the bucket M7 has to beat.
+# the code's. This is the bucket M6's semantic leg exists to beat.
 - q: "How does the app stop two indexing jobs running for the same repository at once?"
   repo: noetra
   kind: conceptual

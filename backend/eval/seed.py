@@ -2,6 +2,7 @@ import argparse
 import base64
 import os
 import subprocess
+import time
 import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,6 +13,7 @@ from core.db import SessionLocal
 from core.models import Repository, RepositoryStatus, User
 from core.security import decrypt_token
 from eval.repos import EVAL_REPOS, EvalRepo
+from worker.embedding import embed_repository
 from worker.indexing import index_repository_files
 
 # Fixed namespace so the eval user and each repo get deterministic UUIDs — re-running
@@ -80,7 +82,29 @@ def _clone_at_sha(repo: EvalRepo, dest: Path, token: str | None) -> None:
     subprocess.run(["git", "-C", str(dest), "checkout", "-q", repo.sha], check=True)
 
 
-def seed(force: bool = False) -> None:
+def _embed_repo(db: Session, repo: Repository, key: str) -> None:
+    """Embed a repo's chunks and print progress; non-fatal on failure.
+
+    Mirrors worker/tasks.py's production handling: an embedding failure (quota, rate
+    limit) shouldn't kill the whole seed run over one repo — print it and move on. The
+    repo stays fully lexically searchable, and WHERE embedding IS NULL means a later
+    re-run (even without --force) picks up wherever this one stopped.
+    """
+    embed_start = time.perf_counter()
+    try:
+        embedded = embed_repository(db, repo)
+    except Exception as exc:
+        db.rollback()
+        print(f"  embedding failed for {key}: {exc}")
+        return
+    elapsed = time.perf_counter() - embed_start
+    if embedded:
+        print(f"  embedded {embedded} chunk(s) for {key} in {elapsed:.1f}s")
+    else:
+        print(f"  {key}: embeddings already complete")
+
+
+def seed(force: bool = False, no_embed: bool = False) -> None:
     """Index every pinned eval repo into the database under the synthetic eval user (idempotent)."""
     db = SessionLocal()
     try:
@@ -89,7 +113,12 @@ def seed(force: bool = False) -> None:
             repo_id = eval_id(repo_def.key)
             existing = db.get(Repository, repo_id)
             if existing is not None and not force:
-                print(f"skip {repo_def.key}: already seeded (use --force to reseed)")
+                print(f"skip {repo_def.key}: already indexed (use --force to reseed)")
+                # Still resume embedding even without --force — embed_repository selects
+                # WHERE embedding IS NULL, so re-running after an interrupted seed (a
+                # 429, a killed process) continues instead of needing a full reseed.
+                if not no_embed:
+                    _embed_repo(db, existing, repo_def.key)
                 continue
 
             try:
@@ -126,17 +155,28 @@ def seed(force: bool = False) -> None:
                     db.delete(stuck)
                     db.commit()
                 raise
-            print(f"  done: {repo_def.key} indexed (status={repo.status.value})")
+            print(f"  indexed: {repo_def.key} (status={repo.status.value})")
+
+            # Deliberately outside the try/except above: an indexing failure means the
+            # repo really is broken (delete and retry from scratch is correct), but an
+            # embedding failure (rate limit, quota) shouldn't wipe a repo that's already
+            # fully chunked and searchable. Left unembedded, it just resumes above on the
+            # next --force-less run.
+            if not no_embed:
+                _embed_repo(db, repo, repo_def.key)
     finally:
         db.close()
 
 
 def main() -> None:
-    """CLI entry point: `python -m eval.seed [--force]`."""
+    """CLI entry point: `python -m eval.seed [--force] [--no-embed]`."""
     parser = argparse.ArgumentParser(description="Seed the pinned eval repos into the database.")
     parser.add_argument("--force", action="store_true", help="delete and re-index repos already seeded")
+    parser.add_argument(
+        "--no-embed", action="store_true", help="skip embedding — for fast chunker-only iteration"
+    )
     args = parser.parse_args()
-    seed(force=args.force)
+    seed(force=args.force, no_embed=args.no_embed)
 
 
 if __name__ == "__main__":

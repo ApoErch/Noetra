@@ -143,12 +143,20 @@ staging is what the build order in `CLAUDE.md` rests on.
 | `code_entity(repository_id, name)` | symbol lookup (chunking, call resolution, M8 repo map) | **M4** |
 | `file(repository_id, content_hash)` | incremental re-index | **M4** |
 | GIN on `chunk.content_tsv` | lexical retrieval over chunks (what `search()` actually uses) | **M5** |
-| HNSW on `chunk.embedding` | semantic retrieval | **M6** |
 | `reference_edge(repository_id, to_entity_id)` | `get_callers` — the reverse direction, which is the one that needs the index | **M7** |
 
-HNSW over IVFFlat for the vector index: it needs no training step and no "how many lists?"
-tuning pass, and query recall is better at V1 scale. IVFFlat wins on build time at very
-large row counts, which is not a problem V1 has. Operator class is `vector_cosine_ops`.
+**No vector index in V1 (deferred, not forgotten).** `chunk.embedding` has no HNSW/IVFFlat
+index — `semantic_search()` does an exact `<=>` cosine scan. Two reasons: the per-file cap
+(`row_number() OVER (PARTITION BY file_id ...)`) already forces a full sort over every
+matching chunk, so an ANN index would sit unused by the only query that reads this column;
+and at V1 scale (hundreds to a few thousand chunks per repo) an exact scan is tens of
+milliseconds — faster to add than to need. This is the *brute-force vs. ANN crossover*:
+below roughly 10⁵ vectors per filter partition, exact search wins on both correctness and
+often latency. Revisit if per-repo chunk counts grow enough that the scan shows up in the
+latency budget — at that point it'd be `HNSW ... USING hnsw (embedding vector_cosine_ops)`,
+and note pgvector 0.8+'s `hnsw.iterative_scan` would also be needed, since a plain HNSW
+index returns global top-k *before* the `repository_id` filter applies, silently returning
+fewer rows than requested.
 
 ## Deferred to V2 (not created in V1)
 
