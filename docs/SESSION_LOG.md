@@ -402,3 +402,25 @@ pipeline stage, and `semantic_search()` fused via the already-written (currently
 - `docker compose restart` does **not** re-read `env_file`; after editing `.env` use `docker compose up -d --force-recreate api worker`. Cost this session ~10 minutes.
 - Image rebuild needed after any `pyproject.toml` change (`docker compose build api worker`); done this session for `openai`/`tiktoken`.
 - Pre-existing, untouched: 3 ruff findings (`api/auth.py`, init migration) and mypy `celery` stub warnings; `retry_repository` still only accepts `FAILED`, so a repo parked at `EMBEDDING` has no API resume.
+
+---
+
+## Session — 2026-09-04 23:41
+
+**Worked on:** No code. Research + design review of the graph leg (planned M7), triggered by the user challenging "fuse the graph into RRF as a third leg". Ended in a docs-only realignment, committed as `d7582dc`.
+**Done:**
+- Researched how the field handles graph/structural code retrieval: LARGER, RepoGraph, LocAgent, CodexGraph, Codebase-Memory, GraphRAG-Bench, CodeCompass (papers) and Sourcegraph/Cody, Augment, Greptile, Cursor, Claude Code, Aider (production). **No system fuses graph neighbours into a ranked list.** The graph appears as agent tools, a sidecar attached to a hit (LARGER), or prompt orientation (Aider). RepoGraph: 1-hop best, 2-hop worst. LocAgent: graph tool +4 pts vs keyword search +13. GraphRAG-Bench: graphs lose on simple lookups.
+- Reasoning that settled it: RRF combines *independent estimates of query relevance*; hop distance from a seed is a property of the seed, not the query, and a seeded leg can only amplify the other two. Whether a neighbour matters depends on the question — only an agent can judge that per query.
+- Realigned `BUILD_ORDER`, `RETRIEVAL` (graph section rewritten with the research digest + a worked agent trace), `DATA_MODEL` (`reference_edge.confidence`), `FEATURES`, `WORKFLOW`, `ARCHITECTURE`, `STACK`, `CLAUDE.md`, `LEARNING_LOG`; `CONCEPTS.md` gained **A23** + **B20**, and **B17** is struck through as superseded.
+**In progress:** Nothing. Working tree clean after `d7582dc`.
+**Key decisions:**
+- **The graph is agent tools, never an RRF leg.** Fusion stays lexical + semantic. Tools: `list_dependencies` (free — `dependency_edge` exists), `get_callees`, `get_callers`; one hop per call; edges carry a resolution confidence (0.9 same file → 0.85 imported file → 0.7 unique name → 0.3 ambiguous), tools filter at ≥0.5.
+- **Milestones swapped: M7 = the agent, M8 = the call graph.** The graph's value can only be measured inside the agent loop (tools on vs off), so building it first would ship it unmeasured — the project's own measure-then-buy rule.
+- Honest scope: keyword search already finds a name's call sites, so `get_callers` mostly adds the enclosing caller; `get_callees` is the genuinely new capability.
+- A LARGER-style `related` sidecar on `/search` hits is deferred, not rejected — trigger is the agent eval still failing multi-hop conceptual questions with the tools present.
+**Next step:** Plan and build **M7 — the agent** in its own planning session: tools `code_search` + `read_file` + `list_dependencies`, repo map, hand-rolled LangGraph `StateGraph`, SSE with tool-call status, CRAG-style grade + citation-verification nodes, and the agent-mediated eval in `eval/run.py` (checkpointed per question). That eval is the baseline M8 is measured against.
+**Watch out for:**
+- Old `docs/SESSION_LOG.md` entries (2026-07-26 18:12, 2026-09-04 22:41) still describe the seeded-third-leg design and "M7 = graph leg" — historical, not current. Trust `BUILD_ORDER.md` / `RETRIEVAL.md` / `CONCEPTS.md` B20.
+- `docs/PLAN.md` (old Gemini M6 plan) is still untracked and `.env` still has dead `GEMINI_*` lines — both still pending deletion from the prior session.
+- `eval/run.py:232` enumerates the whole `RetrieverSource` enum as the "ran" list when `--legs` is None; adding a `GRAPH` member in M8 without fixing that would mis-report it as a search leg. Use `_ALL_LEGS` there.
+- Docker services were not touched this session (no code ran).
