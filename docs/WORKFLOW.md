@@ -67,8 +67,8 @@ chunking       AST-aware chunks (by function/class, never fixed windows), each w
   │            its context prefix; content_tsv generates itself over embed_text
   │            → LEXICAL SEARCH USABLE FROM HERE
   ▼
-embedding      embed each chunk's embed_text (gemini-embedding-001, 1536 dims) → pgvector
-  │            ← the slow, network-bound, rate-limited stage. Deliberately last.
+embedding      embed each chunk's embed_text (text-embedding-3-small, 1536 dims) → pgvector
+  │            ← the slow, network-bound stage. Deliberately last.
   │            → FUSED LEXICAL + SEMANTIC SEARCH USABLE FROM HERE
   ▼
 metrics        basic aggregates: file count, function count, total LOC,
@@ -78,15 +78,15 @@ ready          everything persisted; chat + dashboard unlock
 ```
 
 **Why this order.** Everything deterministic and local (symbol table, graphs, chunks +
-their lexical index) runs before the one stage that makes thousands of network calls
-against a rate-limited API. Two payoffs: the user gets a usable product early in the run
-rather than only at the end, and a failure in `embedding` leaves a repo that is still
-searchable and browsable instead of one that is worthless.
+their lexical index) runs before the one stage that makes network calls against an external
+API. Two payoffs: the user gets a usable product early in the run rather than only at the
+end, and a failure in `embedding` leaves a repo that is still searchable and browsable
+instead of one that is worthless.
 
-That second payoff is not hypothetical on a free tier. `embedding` **will** hit 429s on a
-large repo, which is why `chunk.embedding` is nullable and the stage selects
-`WHERE embedding IS NULL` — a retry resumes where it stopped instead of re-embedding
-everything, and a repo stuck part-way through still answers lexical search correctly.
+That second payoff is why `chunk.embedding` is nullable and the stage selects
+`WHERE embedding IS NULL` — a retry after a crash or provider outage resumes where it
+stopped instead of re-embedding everything, and a repo stuck part-way through still answers
+lexical search correctly.
 
 `graphing` moved ahead of `chunking`/`embedding` for the same reason — it's pure import
 resolution over data `parsing` already produced, so there's no reason for it to sit behind
@@ -97,12 +97,12 @@ retry action — these stages are deterministic and local, so a failure means th
 is broken.
 
 **`embedding` is the one exception, deliberately.** It's the first stage that can fail for
-reasons that have nothing to do with the repo — a quota limit, not a bug. A failure there is
-caught, logged, and leaves `status=embedding` rather than `failed`: the repo stays exactly as
-searchable as it was (lexical still works, chat doesn't exist until `ready`), and a later
-retry resumes via `WHERE embedding IS NULL` instead of needing a full re-index. Marking it
-`failed` would have made `retry_repository`'s existing cleanup delete every `File` row —
-cascading away every embedding already paid for — over what's often just a rate limit.
+reasons that have nothing to do with the repo — a provider outage or a bad key, not a bug. A
+failure there is caught, logged, and leaves `status=embedding` rather than `failed`: the repo
+stays exactly as searchable as it was (lexical still works, chat doesn't exist until `ready`),
+and a later retry resumes via `WHERE embedding IS NULL` instead of needing a full re-index.
+Marking it `failed` would have made `retry_repository`'s existing cleanup delete every `File`
+row — cascading away every embedding already paid for — over a transient external error.
 
 ## Stage responsibilities
 
@@ -123,10 +123,9 @@ cascading away every embedding already paid for — over what's often just a rat
   a Postgres *generated* column over `embed_text`, so the lexical index maintains itself as
   rows are written — no separate indexing step, no cost to this stage. See `RETRIEVAL.md`
   — both chunking rules are non-negotiable.
-- **embedding** — `core/ai`, `gemini-embedding-001` at 1536 dims, `task_type=RETRIEVAL_DOCUMENT`.
-  Batched, rate-limited, and 429-backed-off for the free tier. Resumable via
-  `WHERE embedding IS NULL`. Skip by file `content_hash` so re-indexing unchanged files
-  costs nothing. The only network-bound stage.
+- **embedding** — `core/ai`, `text-embedding-3-small` at 1536 dims, one request per page
+  of 200 chunks. Resumable via `WHERE embedding IS NULL`. Skip by file `content_hash` so
+  re-indexing unchanged files costs nothing. The only network-bound stage.
 - **metrics** — pure aggregation over already-extracted data; cheap to recompute.
   V1 keeps this basic — counts, languages, largest files. No dead-code/complexity/etc.
 

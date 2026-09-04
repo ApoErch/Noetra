@@ -24,18 +24,18 @@ clone time (M3), so a `tsvector` index over it was one migration and zero pipeli
 which was enough retrieval to build the whole citation path against.
 
 **Semantic retrieval is no longer conditional.** It was gated on "only if the eval proves
-lexical is failing" because embeddings were expensive to build *and* expensive to redo. On
-Gemini's free tier the cost half of that argument is gone, and the product decision is made:
-agentic RAG needs a semantic leg for the conceptual class of question. The eval stops being
-a *gate* and goes back to being a *scoreboard*.
+lexical is failing" because embeddings were expensive to build *and* expensive to redo. At
+~$0.02 per million tokens the cost half of that argument is gone, and the product decision
+is made: agentic RAG needs a semantic leg for the conceptual class of question. The eval
+stops being a *gate* and goes back to being a *scoreboard*.
 
 ## Status
 
 **Done:** M1 Skeleton · M2 Auth · M3 Import + clone · M4 Parse + extract · M5 Eval + hybrid
-search + AST chunking. **M6 (Gemini provider layer + semantic leg): code complete, recall
-delta not yet measured** — the free tier's daily embedding quota (1,000 requests) was
-exhausted mid-measurement; needs one clean full re-seed + eval run once quota resets or
-billing is enabled. **Next up: finish M6's measurement, then M7.**
+search + AST chunking · **M6 provider layer + semantic leg — measured 2026-09-04** on OpenAI
+after the Gemini free tier blocked the first attempt (`CONCEPTS.md` A20): semantic-only
+`recall@5` 0.85 vs the 0.72 lexical baseline; fused 0.85 / 0.91 after re-tuning RRF to
+`k=10` with a 2× semantic weight (A22) — beating either leg alone. **Next up: M7.**
 
 Per-milestone writeups live in `LEARNING_LOG.md`.
 
@@ -63,16 +63,19 @@ Per-milestone writeups live in `LEARNING_LOG.md`.
      0.72 / `recall@20` 0.78**. (0.76 / 0.81 was the pre-removal hybrid number — don't quote
      it as the current one.)
 
-6. ~~**Gemini provider layer + the semantic leg.**~~ **Code done, measurement pending.**
-   `core/ai` (the only module that imports any provider SDK — Gemini for embeddings, plus a
-   switchable chat factory covering OpenAI/Anthropic for M8 testing) with a batched,
-   rate-limited, resumable embedding client. `chunk.embedding vector(1536)` — **no index**
-   in V1, exact cosine scan instead (see `DATA_MODEL.md`'s deferred-and-why) — an
-   `embedding` pipeline stage (non-fatal on failure, see `WORKFLOW.md`), and
-   `semantic_search()` fused with lexical via the RRF already written in `fusion.py`.
-   Chunking shipped in M5, so this was purely the embedding leg.
-   **Ends with a measured recall delta against the pinned lexical-only baseline** — blocked
-   for now on the free tier's daily embedding quota; see `RETRIEVAL.md`.
+6. ~~**Provider layer + the semantic leg.**~~ **Code done, measurement pending.**
+   `core/ai` (the only module that imports any provider SDK — OpenAI `text-embedding-3-small`
+   for embeddings behind an `EMBEDDING_PROVIDER` switch, plus a chat factory covering
+   OpenAI/Anthropic for M8 testing) with a resumable embedding client.
+   `chunk.embedding vector(1536)` — **no index** in V1, exact cosine scan instead (see
+   `DATA_MODEL.md`'s deferred-and-why) — an `embedding` pipeline stage (non-fatal on
+   failure, see `WORKFLOW.md`), and `semantic_search()` fused with lexical via the RRF
+   already written in `fusion.py`. Chunking shipped in M5, so this was purely the embedding
+   leg. Built first on Gemini's free tier; moved to OpenAI after the quotas made the
+   measurement impossible.
+   **Measured against the pinned lexical-only baseline:** conceptual `@5` 0.36 → 0.64,
+   overall 0.72 → 0.85. Fusion needed two measured fixes to beat semantic alone (`k=10`,
+   semantic weighted 2×) — see `RETRIEVAL.md`.
 
 7. **The graph leg.** Call-graph extraction — a second Tree-sitter walk that *does* descend
    into function bodies (the existing one deliberately stops there), resolving callee names
@@ -88,7 +91,7 @@ Per-milestone writeups live in `LEARNING_LOG.md`.
    `call_model`, `ToolNode`, and the `should_continue` edge; LangGraph only runs the graph.
    Streamed over SSE with tool-call status, citations built from tool-result metadata. Chat
    UI reuses the existing citation → Monaco overlay path. Extends `eval/run.py` to score
-   agent-mediated retrieval (resumable — free-tier chat quota makes a full run a day's work).
+   agent-mediated retrieval (checkpointed per question, so an interrupted run resumes).
    - **Two hallucination-mitigation steps, both cheap.** A CRAG-style retrieval grade runs
      right after each tool call, before that result reaches the model: junk/irrelevant tool
      output triggers a re-search instead of being handed to `call_model` to generate from. A

@@ -21,10 +21,10 @@
                                                │
                               ┌────────────────┼────────────────┐
                               ▼                ▼                ▼
-                         Tree-sitter       Gemini API       Git / GitHub API
+                         Tree-sitter       OpenAI API       Git / GitHub API
                          (parse+chunk)   (chat / embed)     (clone / metadata)
-                                        gemini-3.5-flash
-                                        gemini-embedding-001
+                                        gpt-4o-mini
+                                        text-embedding-3-small
 ```
 
 ## Components
@@ -55,16 +55,13 @@ pgvector keeps embeddings in the same DB — no second datastore in V1.
 
 - `core/db` — SQLAlchemy models + session.
 - `core/github` — the only place that talks to git/GitHub.
-- `core/ai` — the only place that imports any AI provider's SDK. Embeddings are
-  Gemini-only (`embed_documents`/`embed_query`); chat is provider-switchable
-  (`get_chat_model(provider)`, default Gemini, OpenAI/Anthropic available for testing the
-  M8 agent). Two narrow interfaces — "generate a streamed completion given messages +
-  tools" and "embed these strings" — which is the entire cost of switching providers later. This seam is worth keeping honest even with one provider,
-  because retrieval quality depends on the embedding model.
-  It also owns everything provider-shaped that would otherwise leak outward: batching, the
-  `task_type` split (`RETRIEVAL_DOCUMENT` when indexing, `CODE_RETRIEVAL_QUERY` when
-  querying), truncation to the model's 2048-token input cap, client-side L2 normalization,
-  and free-tier rate limiting with 429 backoff.
+- `core/ai` — the only place that imports any AI provider's SDK. Embeddings via
+  `EMBEDDING_PROVIDER` (`embed_documents`/`embed_query`, OpenAI); chat via
+  `get_chat_model(provider)` (default OpenAI, Anthropic available for testing the M8
+  agent). Two narrow interfaces — "generate a streamed completion given messages + tools"
+  and "embed these strings" — which is the entire cost of switching providers later. It
+  also owns the one provider-shaped detail that would otherwise leak outward: truncating
+  input to the embedding model's cap, because the API rejects over-long text.
 - `core/retrieval` — the three retrieval legs + RRF fusion (`RETRIEVAL.md`). Used by both
   the search endpoint and the agent tools. No retrieval logic lives anywhere else.
 - `core/agent` — the hand-rolled LangGraph `StateGraph`, the tool definitions, and the
@@ -80,13 +77,13 @@ pgvector keeps embeddings in the same DB — no second datastore in V1.
 - **Indexing:** worker consumes the job, advances status per stage, writes results,
   sets `ready` (or `failed` + error).
 - **Chat:** web → api → LangGraph agent → agent calls retrieval tools in a loop →
-  Gemini → streamed answer with `file:line` citations → web. Tool-call status streams
+  chat model → streamed answer with `file:line` citations → web. Tool-call status streams
   alongside tokens, so a multi-second loop reads as alive rather than hung.
 
 ## Rules
 
 - The request cycle never clones, parses, or embeds — always a Celery task.
-- All Gemini calls (chat + embeddings) go through `core/ai`.
+- All AI calls (chat + embeddings) go through `core/ai`.
 - All git/GitHub access goes through `core/github`.
 - All retrieval goes through `core/retrieval`.
 - `indexer` stays pure (no side effects) for testability.

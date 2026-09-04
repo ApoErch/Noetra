@@ -55,5 +55,7 @@ Languages at launch: Python, JavaScript, TypeScript. Nothing else.
 - Database schema and core entities: @docs/DATA_MODEL.md
 - Per-feature spec: @docs/FEATURES.md
 - Local dev such as services, env vars, first-run commands: @docs/SETUP.md
-- AWS deployment target (phased): @docs/DEPLOYMENT.md
+- AWS deployment (single EC2 + Compose, provisioned by Terraform): @docs/DEPLOYMENT.md
 - Session-to-session handoff (written by `/endsession`): @docs/SESSION_LOG.md
+- Problems we hit + design decisions, interview-oriented (not auto-loaded — read on demand,
+  appended by `/endsession`): `docs/CONCEPTS.md`

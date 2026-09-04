@@ -26,58 +26,44 @@ What we use and why. Versions are pinned in `backend/pyproject.toml` and `web/pa
 | **LangGraph** | Runs the agent's state machine. We write the graph; it executes it. See `RETRIEVAL.md`. |
 | **uv** | One venv for the whole backend. App layout (`package = false`) — `api`/`worker`/`core`/`indexer` are plain importable packages, not installed distributions. |
 
-## AI provider — Google Gemini (embeddings), switchable (chat)
+## AI provider — OpenAI (paid), switchable
 
-**Embeddings stay Gemini-only** — Anthropic has no embedding API at all, and switching
-embedding providers means a full re-embed anyway, so there's no live-switch case for it.
-**Chat is provider-switchable** via `core/ai/chat.py::get_chat_model(provider)`, a factory
-returning a ready LangChain chat model for `"gemini"` / `"openai"` / `"anthropic"` — useful
-for testing the M8 agent loop against a different model. Nothing outside `core/ai` imports
-any provider's SDK directly; that's the seam, not a promise every provider ships equally
-tested — Gemini is the one actually exercised end-to-end.
+Nothing outside `core/ai` imports a provider SDK. Two switch points, both config:
+
+- **Embeddings:** `EMBEDDING_PROVIDER` (only `openai` is implemented) →
+  `core/ai/embeddings.py::embed_documents / embed_query`. Single-provider on purpose:
+  switching embedding models is a full re-embed regardless (a different model is a different
+  vector space), so a live switch has no use case — a new provider is one more branch.
+- **Chat:** `DEFAULT_CHAT_PROVIDER` (`openai` | `anthropic`) →
+  `core/ai/chat.py::get_chat_model(provider)`, a factory returning a ready LangChain chat
+  model — useful for testing the M8 agent loop against a different model.
 
 | | Model | Notes |
 |---|---|---|
-| Chat (default) | `gemini-3.5-flash` | Agent loop. Free tier. `default_chat_provider` config. |
-| Chat (alt.) | `gpt-4o-mini` / `claude-sonnet-5` | Via `get_chat_model("openai"\|"anthropic")`. |
-| Embeddings | `gemini-embedding-001` | **1536 dims** (truncated from its 3072 default). |
+| Embeddings | `text-embedding-3-small` | **1536 dims natively**; vectors arrive unit-normalized; ~8k-token input cap (the API rejects over-long input, so `core/ai` truncates first). ~$0.02 / M tokens. |
+| Chat (default) | `gpt-4o-mini` | Agent loop. |
+| Chat (alt.) | `claude-sonnet-5` | Via `get_chat_model("anthropic")`. |
 
-**Why 1536 and not 3072:** pgvector's HNSW index caps the `vector` type at 2000 dimensions —
-3072 would force the `halfvec` type. 1536 is a Google-recommended Matryoshka size and keeps
-the column on the well-trodden path.
+**Why OpenAI, why paid:** the semantic leg was first built on Gemini's free tier, whose
+per-minute *and* per-day quotas made the M6 measurement impossible and pulled real engineering
+(pacing, token-budget batching, retry tuning) into a feature that a cent's worth of tokens
+makes unnecessary. All of that was deleted, not parameterised — see `CONCEPTS.md` A20/B18.
+Rate limits are not a design constraint on a paid tier; if 429s ever appear, the embedding
+page size (`worker/embedding.py`) is the one knob.
 
-Three provider details that are easy to get wrong and are `core/ai`'s job to absorb:
+1536 is also under pgvector's 2000-dim cap for indexing the plain `vector` type, should an
+ANN index ever be added (none in V1 — see `DATA_MODEL.md`).
 
-- **`gemini-embedding-001` only pre-normalizes at 3072.** At 1536 we L2-normalize
-  client-side or cosine distance is silently wrong — degraded recall, no error.
-- **Input caps at 2048 tokens** (~8 KB). Some leaf-entity chunks exceed it; truncate first.
-- **`task_type` is asymmetric.** `RETRIEVAL_DOCUMENT` when indexing, `CODE_RETRIEVAL_QUERY`
-  when querying. Using one for both sides is a quiet mistake.
-
-### Free-tier limits are a design constraint
-
-`gemini-3.5-flash` is roughly **15 RPM / 1,500 RPD** and one agent turn is 3–6 model calls.
-`gemini-embedding-001`'s free tier is separately capped at **100 requests/minute *and*
-1,000 requests/day** — both measured live in M6 by hitting them, not from published docs.
-That shapes architecture, not just testing:
-
-- The agent eval (~200 calls for a full pass) **must checkpoint per question and resume**.
-- The embedding stage must batch, rate-limit, and back off on 429 — and `chunk.embedding` is
-  **nullable** precisely so it can select `WHERE embedding IS NULL` and resume rather than
-  re-embed a whole repo.
-- The **daily** cap is the one worth respecting, not just the per-minute one: it doesn't
-  recover in the wall-clock time a retry loop would wait, and Google's `retryDelay` hint
-  looks the same (a few seconds) whether it's the per-minute or the daily quota that's
-  actually exhausted — the two are only distinguishable by reading the error's `quotaId`.
-
-Get a key at <https://aistudio.google.com/apikey>. Env vars in `.env.example`; see `SETUP.md`.
+Get a key at <https://platform.openai.com/api-keys>. Env vars in `.env.example`; see `SETUP.md`.
 
 ## Infrastructure
 
 - **Docker Compose** locally: `db` (`pgvector/pgvector:pg16`), `redis`, `api` (uvicorn),
   `worker` (celery). `api` and `worker` build from the same image with different entrypoints.
 - **GitHub Actions** CI.
-- **AWS** deploy target — phased, see `DEPLOYMENT.md`.
+- **AWS** — one EC2 host running this same Compose stack, every resource (VPC, instance,
+  EBS, EIP, IAM role, Route 53, SSM secrets) declared in **Terraform** — infra as reviewable,
+  reproducible code in the repo rather than console clicks. See `DEPLOYMENT.md`.
 
 Coding conventions that apply across all of this (strict typing, secrets via env, scoping by
 `repository_id`) live in `CLAUDE.md` — that's the authority, don't duplicate them here.

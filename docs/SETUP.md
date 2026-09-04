@@ -9,9 +9,8 @@ host during dev — choose per component.
 - Python 3.11+ with `uv`  — backend
 - Node 20+ with pnpm — frontend
 - A GitHub OAuth app (Client ID + Secret)
-- A Google Gemini API key — used for both chat and embeddings. Free tier is enough;
-  get one at <https://aistudio.google.com/apikey>. Note the free-tier limits (roughly
-  15 RPM / 1,500 RPD on `gemini-3.5-flash`) — they're low enough to shape how you test.
+- An OpenAI API key — used for both embeddings and chat. Get one at
+  <https://platform.openai.com/api-keys>. Embedding the eval repos costs cents.
 
 ## Services (docker-compose)
 
@@ -42,11 +41,14 @@ GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 GITHUB_OAUTH_CALLBACK=http://localhost:8000/api/v1/auth/callback
 FRONTEND_URL=http://localhost:5173
-# ai — one provider, both uses; read only by core/ai
-GEMINI_API_KEY=
-GEMINI_CHAT_MODEL=gemini-3.5-flash
-GEMINI_EMBEDDING_MODEL=gemini-embedding-001
-GEMINI_EMBEDDING_DIMENSIONS=1536   # must match chunk.embedding's vector(N); changing it = full re-embed
+# ai — read only by core/ai. Embeddings + chat default to OpenAI; one key covers both.
+EMBEDDING_PROVIDER=openai          # only "openai" is implemented; the switch point for a future provider
+OPENAI_API_KEY=
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small   # 1536 dims — must match chunk.embedding vector(N); changing model = full re-embed
+OPENAI_CHAT_MODEL=gpt-4o-mini
+DEFAULT_CHAT_PROVIDER=openai       # openai | anthropic
+ANTHROPIC_API_KEY=                 # only if testing the chat agent against Anthropic
+ANTHROPIC_CHAT_MODEL=claude-sonnet-5
 # app
 SESSION_SECRET=
 TOKEN_ENCRYPTION_KEY=          # Fernet key: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -85,27 +87,24 @@ docker compose exec api alembic revision --autogenerate -m "msg"
 docker compose exec db psql -U noetra   # inspect the DB
 docker compose down -v                  # reset everything (drops volumes)
 
-# retrieval eval (the scoreboard — see RETRIEVAL.md)
-docker compose exec worker python -m eval.seed             # clone + index + embed the 3 pinned repos
+# retrieval eval (the scoreboard — see RETRIEVAL.md). Default repo is noetra.
+docker compose exec worker python -m eval.seed             # clone + index + embed noetra
 docker compose exec worker python -m eval.seed --force     # re-seed; MANDATORY after any
                                                            # chunker or embedding change
-docker compose exec worker python -m eval.seed --no-embed  # skip embedding — fast, for
+docker compose exec worker python -m eval.seed --no-embed  # skip embedding — for
                                                            # chunker-only iteration
+docker compose exec worker python -m eval.seed --repos all # all 3 pinned repos
 docker compose exec worker python -m eval.run              # recall@5 / recall@20 scoreboard
 docker compose exec worker python -m eval.run --legs lexical            # ablate a leg out
 docker compose exec worker python -m eval.run --legs lexical,semantic   # explicit, both
+docker compose exec worker python -m eval.run --repos noetra,requests   # more repos
 ```
 
 The eval runs in `worker`, not `api` — it needs `git`, the DB, and the `.env` file, and
 `worker` is the only service with all three. Chunks and embeddings are built at *index*
 time, not query time, so changing how either works means re-seeding before the numbers mean
-anything.
-
-**`--force` is now a genuinely slow operation** (M6) — it re-embeds every chunk in all 3
-repos, and the free tier's embedding quota (100 requests/min, **1,000/day** — see
-`STACK.md`) makes this minutes, not seconds. It's resumable (safe to re-run the same command
-after a quota error — it picks up `WHERE embedding IS NULL`), and `--no-embed` skips the
-embedding step entirely when only the chunker changed and lexical-only numbers are enough.
+anything. Embedding is resumable (`WHERE embedding IS NULL`), so an interrupted seed
+continues on the next run; `--no-embed` skips it when only the chunker changed.
 
 ## Notes
 

@@ -66,7 +66,7 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/models.py`. Everything scope
 | content | text | the chunk source, as returned to the model |
 | embed_text | text | what was actually embedded: the context prefix (`path › class › signature`) plus `content`. Stored so a re-embed is reproducible and so you can see what the model saw. Also what `content_tsv` is generated over, so the lexical leg gets the context prefix for free. See `RETRIEVAL.md` → chunking rule. |
 | content_tsv | tsvector, generated | **powers lexical retrieval.** `to_tsvector('english', coalesce(embed_text, ''))`, GIN-indexed. Self-maintaining, like `file.content_tsv`. |
-| embedding | vector(1536), **nullable** | pgvector. 1536 = `gemini-embedding-001` truncated from its 3072 default (Matryoshka). Why 1536 and not 3072: pgvector's **HNSW index caps the `vector` type at 2000 dims** — 3072 would force `halfvec`. Vectors are **L2-normalized client-side**, since `gemini-embedding-001` only pre-normalizes at 3072. **Nullable is load-bearing**: the embedding stage selects `WHERE embedding IS NULL`, so a rate-limit failure resumes instead of restarting the whole repo. |
+| embedding | vector(1536), **nullable** | pgvector. 1536 = `text-embedding-3-small`'s native size (and under pgvector's 2000-dim cap for indexing the plain `vector` type, should an ANN index ever be added). Vectors arrive unit-normalized from the provider. Changing the embedding model = a migration here + a full re-embed. **Nullable is load-bearing**: the embedding stage selects `WHERE embedding IS NULL`, so a crash or provider failure resumes instead of restarting the whole repo. |
 
 ### dependency_edge  *(file-level import graph — `list_dependencies`; V2 architecture view)*
 | field | type | notes |
