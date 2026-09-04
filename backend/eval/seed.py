@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from core.db import SessionLocal
 from core.models import Repository, RepositoryStatus, User
 from core.security import decrypt_token
-from eval.repos import EVAL_REPOS, EvalRepo
+from eval.repos import EvalRepo, select_repos
 from worker.embedding import embed_repository
 from worker.indexing import index_repository_files
 
@@ -85,8 +85,8 @@ def _clone_at_sha(repo: EvalRepo, dest: Path, token: str | None) -> None:
 def _embed_repo(db: Session, repo: Repository, key: str) -> None:
     """Embed a repo's chunks and print progress; non-fatal on failure.
 
-    Mirrors worker/tasks.py's production handling: an embedding failure (quota, rate
-    limit) shouldn't kill the whole seed run over one repo — print it and move on. The
+    Mirrors worker/tasks.py's production handling: an embedding failure (provider outage,
+    bad key) shouldn't kill the whole seed run over one repo — print it and move on. The
     repo stays fully lexically searchable, and WHERE embedding IS NULL means a later
     re-run (even without --force) picks up wherever this one stopped.
     """
@@ -104,19 +104,19 @@ def _embed_repo(db: Session, repo: Repository, key: str) -> None:
         print(f"  {key}: embeddings already complete")
 
 
-def seed(force: bool = False, no_embed: bool = False) -> None:
-    """Index every pinned eval repo into the database under the synthetic eval user (idempotent)."""
+def seed(force: bool = False, no_embed: bool = False, repos: str | None = None) -> None:
+    """Index the selected pinned eval repos (default: noetra) under the synthetic eval user (idempotent)."""
     db = SessionLocal()
     try:
         user = _ensure_eval_user(db)
-        for repo_def in EVAL_REPOS:
+        for repo_def in select_repos(repos):
             repo_id = eval_id(repo_def.key)
             existing = db.get(Repository, repo_id)
             if existing is not None and not force:
                 print(f"skip {repo_def.key}: already indexed (use --force to reseed)")
                 # Still resume embedding even without --force — embed_repository selects
                 # WHERE embedding IS NULL, so re-running after an interrupted seed (a
-                # 429, a killed process) continues instead of needing a full reseed.
+                # provider error, a killed process) continues instead of needing a full reseed.
                 if not no_embed:
                     _embed_repo(db, existing, repo_def.key)
                 continue
@@ -159,7 +159,7 @@ def seed(force: bool = False, no_embed: bool = False) -> None:
 
             # Deliberately outside the try/except above: an indexing failure means the
             # repo really is broken (delete and retry from scratch is correct), but an
-            # embedding failure (rate limit, quota) shouldn't wipe a repo that's already
+            # embedding failure (provider outage) shouldn't wipe a repo that's already
             # fully chunked and searchable. Left unembedded, it just resumes above on the
             # next --force-less run.
             if not no_embed:
@@ -169,14 +169,17 @@ def seed(force: bool = False, no_embed: bool = False) -> None:
 
 
 def main() -> None:
-    """CLI entry point: `python -m eval.seed [--force] [--no-embed]`."""
+    """CLI entry point: `python -m eval.seed [--force] [--no-embed] [--repos noetra,requests|all]`."""
     parser = argparse.ArgumentParser(description="Seed the pinned eval repos into the database.")
     parser.add_argument("--force", action="store_true", help="delete and re-index repos already seeded")
     parser.add_argument(
         "--no-embed", action="store_true", help="skip embedding — for fast chunker-only iteration"
     )
+    parser.add_argument(
+        "--repos", type=str, default=None, help="comma-separated repo keys, or 'all' (default: noetra)"
+    )
     args = parser.parse_args()
-    seed(force=args.force, no_embed=args.no_embed)
+    seed(force=args.force, no_embed=args.no_embed, repos=args.repos)
 
 
 if __name__ == "__main__":

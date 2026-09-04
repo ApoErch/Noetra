@@ -14,7 +14,7 @@ from core.db import SessionLocal
 from core.models import File
 from core.retrieval import search
 from core.retrieval.types import RetrieverSource
-from eval.repos import EVAL_REPOS_BY_KEY
+from eval.repos import EVAL_REPOS_BY_KEY, select_repos
 from eval.seed import eval_id
 
 _LEG_NAMES = {"lexical": RetrieverSource.LEXICAL, "semantic": RetrieverSource.SEMANTIC}
@@ -208,9 +208,14 @@ def report(results: list[QuestionResult]) -> None:
         print(f"  [{result.question.kind.value}/{result.question.repo}] {result.question.query}{wrong_line}")
 
 
-def run(questions_path: Path = _QUESTIONS_PATH, legs: tuple[RetrieverSource, ...] | None = None) -> None:
-    """Score every pinned question against the seeded repos and print the scoreboard."""
-    questions = load_questions(questions_path)
+def run(
+    questions_path: Path = _QUESTIONS_PATH,
+    legs: tuple[RetrieverSource, ...] | None = None,
+    repos: str | None = None,
+) -> None:
+    """Score the pinned questions for the selected repos (default: noetra) and print the scoreboard."""
+    selected = {repo.key for repo in select_repos(repos)}
+    questions = [q for q in load_questions(questions_path) if q.repo in selected]
     db = SessionLocal()
     try:
         problems = validate_answers(db, questions)
@@ -226,18 +231,22 @@ def run(questions_path: Path = _QUESTIONS_PATH, legs: tuple[RetrieverSource, ...
 
     ran = [leg.value for leg in legs] if legs is not None else [leg.value for leg in RetrieverSource]
     print(f"legs: {', '.join(ran)}")
+    print(f"repos: {', '.join(sorted(selected))}")
     report(results)
 
 
 def main() -> None:
-    """CLI entry point: `python -m eval.run [--questions PATH] [--legs lexical,semantic]`."""
+    """CLI entry point: `python -m eval.run [--questions PATH] [--legs lexical,semantic] [--repos noetra|all]`."""
     parser = argparse.ArgumentParser(description="Score retrieval against the pinned eval questions.")
     parser.add_argument("--questions", type=Path, default=_QUESTIONS_PATH, help="path to questions.yaml")
     parser.add_argument(
         "--legs", type=str, default=None, help="comma-separated legs to run, e.g. lexical or lexical,semantic (default: both)"
     )
+    parser.add_argument(
+        "--repos", type=str, default=None, help="comma-separated repo keys, or 'all' (default: noetra)"
+    )
     args = parser.parse_args()
-    run(args.questions, parse_legs(args.legs))
+    run(args.questions, parse_legs(args.legs), args.repos)
 
 
 if __name__ == "__main__":
