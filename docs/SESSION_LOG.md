@@ -372,3 +372,33 @@ pipeline stage, and `semantic_search()` fused via the already-written (currently
 - **`search()`'s semantic-leg failure is silent by design** (degrades to lexical, no error, no log). Correct for production, but means no eval number from a quota-exhausted window can be trusted — always sanity-check with one direct `embed_query()` call before trusting a semantic/fused eval run.
 - Docker images were rebuilt this session for the new deps (`google-genai`, `pgvector`, `langchain-*`) — a plain restart won't pick up any *future* `pyproject.toml` change; needs `docker compose build api worker` again.
 - `.env` now has a real `GEMINI_API_KEY` filled in by the user directly (never passed through chat) — confirmed still gitignored, not committed.
+
+---
+
+## Session — 2026-09-04 22:41
+
+**Worked on:** Closing Milestone 6 — switched the AI provider from Gemini (free tier) to paid OpenAI, stripped every piece of rate-limit machinery, measured the semantic leg for real, fixed fusion twice, and restructured `CONCEPTS.md`/`RETRIEVAL.md`/`DEPLOYMENT.md`. Six commits on `develop` (`1ae53b2`…`ecff5fd`).
+**Done:**
+- `core/ai/embeddings.py` rewritten for OpenAI `text-embedding-3-small` (1536 native, provider-normalized); `core/ai/chat.py` is `openai` | `anthropic` only; `google-genai`/`langchain-google-genai` removed, `openai` + `tiktoken` added. `EMBEDDING_PROVIDER` + `OPENAI_API_KEY` is the whole switch. Pacing sleep, token-budget batching, retry tuning, `task_type`, client-side L2 normalization — all deleted.
+- One guard kept: input truncation by **real token count** (`tiktoken`, 8,000 tokens) — a chars/token guess failed live on `uv.lock` gap chunks (hashes ≈1.5 chars/token) with a 400 from OpenAI.
+- `search()`'s silent semantic fallback now `logger.warning`s, so an eval run shows whether semantic actually ran.
+- `eval.seed` / `eval.run` gained `--repos` (default `noetra`; `all` or a comma list). All three eval repos re-embedded on OpenAI (noetra 248, requests 1040, zod 3563 chunks; 0 nulls).
+- **M6 measured, all 46 questions, line-level recall@5/@20:** lexical 0.72/0.78 (baseline reproduced exactly) · semantic-only 0.85/0.93 · **fused (shipped) 0.85/0.91**. Conceptual @5 0.36 → 0.57 fused (0.64 semantic-only).
+- Fusion needed two measured fixes: (1) RRF `k` 60→10 and per-leg fetch `limit` not `2×limit` — on 20-deep lists the paper's `k` let "in both legs at rank 40" beat "rank 2 in one leg", so equal-weight fusion scored 0.72, no better than lexical; (2) **weighted RRF, semantic 2×** — with equal votes lexical out-voted semantic on conceptual questions (0.78); at 2× fused matches semantic's @5 and keeps the docs/keyword hits semantic-only loses; at 3×+ the result is identical to semantic-only. `reciprocal_rank_fusion` now takes `weights`.
+- Docs: `CONCEPTS.md` rewritten (1,517 → ~430 lines) as an interview file — Section A problems (A1–A22, incl. the new A20 free-tier story and A22 fusion story), Section B decisions (B1–B19, incl. the stack "why X over Y" entries, B18 paid OpenAI, B19 EC2+Terraform). `RETRIEVAL.md` cut 327 → ~235 lines with the measurement table. `DEPLOYMENT.md` rewritten for one EC2 host running the same Compose stack, provisioned by Terraform (ECS/Fargate deferred with a stated trigger). `STACK`/`ARCHITECTURE`/`SETUP`/`WORKFLOW`/`DATA_MODEL`/`BUILD_ORDER`/`FEATURES`/`README`/`CLAUDE.md` realigned. `/endsession` skill's CONCEPTS step rewritten to the problems/decisions format.
+**In progress:** Nothing — M6 is closed with a measured, reproduced number through the real `search()` path.
+**Key decisions:**
+- Paid OpenAI over free Gemini → the quota machinery was outgrowing the feature and a silent fallback had already produced one untrustworthy number; at ~$0.02/M tokens the cost argument is gone. Deleted rather than parameterised: **no rate-limit code until a 429 actually appears** (user's explicit rule).
+- Embeddings single-provider by design → switching models is a full re-embed regardless, so a live switch has no use case; a new provider is one branch in `core/ai`.
+- `k=10`, fetch `limit`, semantic 2× → all three set by a sweep on the harness, none from the paper; `k<10` and weight >2 buy nothing (weight ≥3 = semantic-only).
+- Eval defaults to noetra for demos; requests/zod kept and runnable via `--repos all`.
+- Single EC2 + Compose via Terraform over ECS Fargate → zero dev/prod drift, one bill; split worker/RDS only when queue depth or latency says so.
+**Next step:** **M7 — the graph leg.** Call-graph extraction (`reference_edge`, name-based resolution), `expand(seeds, max_hops=2)` over `reference_edge ∪ dependency_edge` seeded from the fused top hits (note: that seed list is now the semantic-2× one), fused as a third RRF list with its own weight to measure, plus `get_callers`/`get_callees`/`list_dependencies` tools. Ends with the same in/out ablation. Baseline to beat: fused 0.85/0.91.
+**Watch out for:**
+- **`.env` still has dead `GEMINI_*` lines** (ignored, harmless) — delete at leisure. `docs/PLAN.md` (the old Gemini M6 plan) is still untracked; delete it.
+- A user-imported `ApoErch/Noetra` repo row has 303 chunks with **NULL embeddings** (Gemini-era import, never embedded). Semantic is data-gated so it just runs lexical-only; re-import or run `embed_repository` on it if it matters.
+- **The eval feeds raw English to `search()`**, which favours semantic. The M8 agent will send identifier-shaped queries where lexical and semantic tie (symbol/keyword ≈ 1.0/0.93 either way). Don't read the 2× weight as "lexical barely matters" — it's what keeps docs and keyword@20 at 1.00.
+- The remaining 5 misses are all `conceptual`, 3 of them "right file, wrong lines" — a localization problem, the shape M7's graph expansion (or M8's `read_file`) addresses, not more fusion tuning.
+- `docker compose restart` does **not** re-read `env_file`; after editing `.env` use `docker compose up -d --force-recreate api worker`. Cost this session ~10 minutes.
+- Image rebuild needed after any `pyproject.toml` change (`docker compose build api worker`); done this session for `openai`/`tiktoken`.
+- Pre-existing, untouched: 3 ruff findings (`api/auth.py`, init migration) and mypy `celery` stub warnings; `retry_repository` still only accepts `FAILED`, so a repo parked at `EMBEDDING` has no API resume.
