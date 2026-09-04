@@ -24,19 +24,20 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
 ## 4. AI Chat  *(primary feature — this is the agentic RAG surface)*
 - Natural-language questions: "Explain authentication", "Where is Redis used?",
   "How do payments work?"
-- **LangGraph agent** with five retrieval tools: `code_search`, `read_file`,
-  `list_dependencies`, `get_callers`, `get_callees`. Iterates like a developer exploring the
-  repo. See `RETRIEVAL.md`.
+- **LangGraph agent** with retrieval tools: `code_search`, `read_file`, `list_dependencies`
+  in milestone 7; `get_callees`, `get_callers` (the call graph) join in milestone 8, once the
+  agent eval exists to measure them. Iterates like a developer exploring the repo. See
+  `RETRIEVAL.md`.
 - **The agent picks its own strategy per query** — that's the actual feature, not "chat with
   a retriever bolted on." An exact-identifier question resolves in one `code_search` and
-  stops. A vague conceptual one searches, expands the top hit through the call graph, reads
-  a file, and searches again with better terms if the first pass came back thin.
+  stops. A vague conceptual one searches, follows the top hit's callees, reads a file, and
+  searches again with better terms if the first pass came back thin.
 - Loop is a **hand-rolled `StateGraph`** (state → `call_model` → `should_continue` →
   `ToolNode` → back), not `create_react_agent`. We need custom nodes for citation collection
   and repo-map priming anyway.
 - Oriented by an AI-free **repo map** — a PageRank-ranked table of contents (top symbols per
   file, ranked by import-graph centrality) in the *stable* prompt prefix, so the agent's
-  first search is informed rather than a blind guess. Built in milestone 8 from
+  first search is informed rather than a blind guess. Built in milestone 7 from
   `code_entity` + `dependency_edge`. See `RETRIEVAL.md`.
 - Streamed answers over SSE, each citing concrete `file:line` locations rendered as links
   into Monaco — reusing the citation → overlay path search already proved. Citations are
@@ -47,7 +48,7 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
   results before they reach the model, and a citation-verification node strips any
   `file:line` in the final answer that isn't backed by a real retrieval hit from that turn.
   See `RETRIEVAL.md`.
-- Build note: ships **directly as the agent** (milestone 8) — there is no single-shot RAG
+- Build note: ships **directly as the agent** (milestone 7) — there is no single-shot RAG
   version. Once the retrievers are already exposed as tools, the multi-step loop is a small
   amount of code on top of them, and a single-shot version would be deleted a week later.
   The earlier plan's "chat v1 then chat v2" split was extra work, not less.
@@ -57,13 +58,13 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
 
 ## 5. Hybrid search
 - Replaces manual Ctrl+Shift+F. "where do we send emails?", "where is `createToken` defined?"
-- Hybrid retrieval: lexical + semantic RRF-fused, plus a graph leg seeded from their top
-  hits (`RETRIEVAL.md`). No reranker — none is available free; see `RETRIEVAL.md`.
+- Hybrid retrieval: lexical + semantic, RRF-fused — two legs, full stop. The call graph is
+  an agent tool, not a search leg (`RETRIEVAL.md`). No reranker in V1; see `RETRIEVAL.md`.
 - Ranked results with `file:line` + one-line context. Click → open in Monaco at that line.
 - Build note: shipped in milestone 5 with **lexical + structural v1**, then structural v1 was
   removed after an eval-driven ablation showed it moving recall@5 by only +0.04 — see
   `RETRIEVAL.md`'s decision record. Milestone 6 added the semantic leg, fused via weighted
-  RRF (recall@5 0.72 → 0.85 — `RETRIEVAL.md`); the graph leg lands in milestone 7.
+  RRF (recall@5 0.72 → 0.85 — `RETRIEVAL.md`). Nothing else joins the fusion.
   **The endpoint contract and the UI don't change through any of that** — only what's behind
   `core/retrieval` does. Shipping search early is what proved the citation path end-to-end
   and gave the eval harness something to measure.

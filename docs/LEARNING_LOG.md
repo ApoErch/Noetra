@@ -156,7 +156,8 @@ is the same number that lets you delete one, and deleting is where it's actually
 
 Worth being precise in interviews about *what* was cut, because the name is overloaded: this
 was symbol-**name** lookup, not graph traversal. Call-graph retrieval ("who calls this?") is
-a different thing on different data and is being built in M7.
+a different thing on different data — it ships as agent tools in M8, after the agent, and
+never as a fused leg (`CONCEPTS.md` B20).
 
 ## Milestone 6 — Semantic retrieval + provider layer
 

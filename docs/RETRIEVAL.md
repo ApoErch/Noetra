@@ -1,22 +1,23 @@
 # Retrieval (the core)
 
-Noetra uses **agentic RAG**: three retrieval legs that answer different kinds of question, and
-an agent that decides which to use, in what order, and how many times. The agent is only as
-good as what this returns.
+Noetra uses **agentic RAG**: two fused retrieval legs (lexical + semantic) that answer
+different kinds of question, graph tools that walk from a location to whatever is connected
+to it, and an agent that decides which to use, in what order, and how many times. The agent
+is only as good as what this returns.
 
 **Agentic** means retrieval is not a fixed pre-LLM step — the model calls it mid-reasoning and
 iterates. An exact identifier resolves in **one** `code_search` and never touches the vector
-index. A vague conceptual question may search, expand the top hit via `get_callers`, then
+index. A vague conceptual question may search, follow the top hit via `get_callees`, then
 search again with better terms. That per-query branching is what separates it from
 RAG-with-extra-steps.
 
-## The three legs
+## The legs
 
 | Leg | Answers | Status |
 |---|---|---|
 | **Lexical** — Postgres full-text over chunk `embed_text` | identifiers, error strings, config keys | shipped (M5) |
-| **Semantic** — pgvector cosine over the same chunks | questions whose words appear *nowhere* in the code | shipped (M6), recall delta pending |
-| **Graph** — traversal over call + import edges | "who calls this?", "what does this import?" | M7 |
+| **Semantic** — pgvector cosine over the same chunks | questions whose words appear *nowhere* in the code | shipped (M6), measured |
+| **Graph** — call + import edges, walked one hop at a time | "what does this call?", "who calls this?", "what does this import?" | agent tools (M8) — **not a fused leg** |
 
 **Lexical.** Two passes: strict `websearch_to_tsquery` (which AND-joins bare terms), then an
 OR-relaxed rewrite backfilling unused slots — strict hits keep their positions, so relaxation
@@ -31,8 +32,9 @@ intuition suggests. *"how does authentication work?"* → `core/security.py`, wh
 range verbatim — see the key-alignment trap below), `match_line=None` because a semantic-only
 hit usually contains none of the query's words.
 
-**Graph.** Takes **locations**, returns **connected locations**. Used two ways — a third RRF
-leg seeded from the other two, and direct agent tools. Details below.
+**Graph.** Takes **locations**, returns **connected locations**. That's *reachability*, not
+*relevance* — which is why it is exposed as tools the agent calls and never fused. Details
+below.
 
 **Naming trap.** "Structural" has meant two things. *Structural v1* — trigram symbol-**name**
 lookup over `code_entity` — shipped in M5 and was **cut** after an ablation showed +0.04
@@ -76,51 +78,57 @@ imports a provider SDK. `EMBEDDING_PROVIDER` + the API key are the entire switch
 Switching embedding providers means a full re-embed (a different model is a different vector
 space), so old vectors are wiped, never mixed.
 
-## The graph leg (M7)
+## The graph: tools, not a leg (M8)
 
-`dependency_edge` is the **file-level import graph**. `reference_edge` adds the **call graph**:
-which entity calls which, resolved **by name** against the symbol table — same-file first,
-then imported-file candidates, all candidates when genuinely ambiguous. No type inference:
-the standard "poor man's call graph" (ctags, aider), roughly right and enough to orient an
-agent that then reads the real file.
+`dependency_edge` is the **file-level import graph** (M4, already built). `reference_edge`
+adds the **call graph**: which entity calls which, resolved **by name** against the symbol
+table. No type inference: the standard "poor man's call graph" (ctags, aider), roughly right
+and enough to orient an agent that then reads the real file. Each edge carries a
+**confidence** from its resolution tier — same file (0.9) → a file this one imports (0.85)
+→ unique repo-wide name (0.7) → ambiguous, one edge per candidate (0.3) — so callers can
+filter ambiguity out (default `≥ 0.5`). This is the cascade Codebase-Memory and LARGER use.
 
-### As a fusion leg (seeded expansion)
+**Why it is not an RRF leg.** The original M7 plan fused graph neighbours in as a third
+ranked list, seeded from the lexical + semantic top hits. Dropped on 2026-09-04 after
+checking what the field does. The argument:
 
-```
-query ──┬── lexical  ──> top N ──┐
-        └── semantic ──> top N ──┴──> resolve chunks → entity_ids (chunk.entity_id)
-                                             │
-                                    expand(seeds, max_hops=2)
-                                    over reference_edge ∪ dependency_edge
-                                    hop-ranked; ties broken by # of seeds reaching it
-                                             │
-  RRF([lexical, semantic, graph]) ───────────┘  ──> final ranked hits
-```
+- RRF combines **independent estimates of query relevance**. Hop distance from a seed is a
+  property of the *seed*, not the *query* — feeding it to RRF labels "adjacent to something
+  relevant" as "relevant".
+- A seeded leg is not independent: it can only ever amplify what the other two legs already
+  voted for. The coupling cost the old plan "accepted deliberately" was the whole leg.
+- Whether a neighbour matters depends on the *question*. "Where is X defined" needs zero
+  hops; "how does auth flow work" needs several. A fixed leg can't know which; an agent can.
 
-Gap chunks have `entity_id = NULL` and don't seed — they still reach the result via the
-other legs.
+**What the field does — nobody fuses the graph.** LARGER (2026), the closest published
+design to the old plan, attaches confidence-filtered 1-hop neighbours *to the anchoring hit
+in the same tool observation* — expansion was its largest single gain (MuLocBench Acc@5
+55.7 → 48.2 without it), but it is a sidecar on a hit, never a rank vote. RepoGraph: 1-hop
+best, **2-hop worst** (29.7 → 26.0 resolve rate) — "noise dominates". LocAgent exposes
+`TraverseGraph` as a tool: removing it costs −4 pts; removing keyword search costs −13 —
+search is the workhorse, the graph is real but second-order. Augment's context engine keeps
+"a graph index of definitions and call edges for **structural reachability**" beside its
+vector and BM25 indices. Sourcegraph and Greptile use the graph as "find references, pull
+in that context" after search. Aider uses it only to rank the repo map. GraphRAG-Bench
+(ICLR'26) finds graphs win on multi-hop and *lose* on simple lookups because expansion adds
+noise; CodeCompass calls it the *navigation paradox* — rigid graph structure degrades agents.
+Pattern name for what we keep: **graph-augmented agentic retrieval**, not graph-fused search.
 
-**Key-alignment trap.** `fusion.py` dedupes on `(file_id, start_line, end_line)`. If the
-graph leg emits *entity* ranges while the others emit *chunk* ranges, keys never collide, RRF
-never fuses anything, and it degenerates into concatenation **that still looks like it's
-working**. Every expanded entity must map back to its chunk before becoming a `RetrievalHit`.
-
-**The cost, stated honestly.** Seeding from the other legs **couples the retrievers**: a wrong
-seed is reinforced by its neighbours instead of cancelled by an independent leg — the opposite
-of what RRF over independent retrievers buys. Accepted deliberately; M7 ends with the same
-in/out ablation that cut structural v1.
-
-### As agent tools
-
-The same traversal, exposed so the agent expands a location **it** chose:
-`get_callers(entity)`, `get_callees(entity)`, `list_dependencies(path)`.
+**The tools.** `list_dependencies(path)` (M7 — free, `dependency_edge` exists),
+`get_callees(entity)`, `get_callers(entity)` (M8). One hop per call; the agent hops again
+if it wants to. Results are `RetrievalHit`s: an entity maps back to **its chunk** via
+`chunk.entity_id`, so the citation is the same chunk-aligned range every other tool emits,
+with `match_line` = the call site. Honest note: keyword search of a name already finds its
+call *sites*, so `get_callers`' added value is naming the **enclosing caller** and filtering
+mentions in strings/comments; `get_callees` is the genuinely new capability — the reverse
+direction keyword search can't do without reading the body and searching each name.
 
 ## Fusion
 
 **Weighted Reciprocal Rank Fusion**: `score = Σ w_leg / (k + rank)`, **`k=10`**, weights
-**lexical 1 / semantic 2**, each leg contributing exactly `limit` candidates. RRF uses each
-hit's *rank position*, never raw scores — `ts_rank`, cosine similarity, and hop distance
-never need a common scale. The weight is a vote size: equal votes let the weaker leg out-vote
+**lexical 1 / semantic 2**, each leg contributing exactly `limit` candidates. Two legs by
+design — the graph never enters it (above). RRF uses each hit's *rank position*, never raw
+scores — `ts_rank` and cosine similarity never need a common scale. The weight is a vote size: equal votes let the weaker leg out-vote
 the stronger one's correct pick; 2× lets semantic set the order while lexical still adds the
 hits semantic misses. The paper's `k=60` and a `2×limit` over-fetch were measured and
 rejected: on 20-deep lists they let "in both legs at rank 40" outscore "rank 2 in one leg"
@@ -142,10 +150,31 @@ eval shows otherwise.
 - **Stream tool-call status, not just tokens.** *"searching `TokenService`… reading
   `auth/tokens.py`…"* is the difference between alive and hung.
 
-## How the agent uses it (M8)
+## How the agent uses it (M7)
 
 Retrievers are exposed as **tools**: `code_search(query)`, `read_file(path, start?, end?)`,
-`list_dependencies(path)`, `get_callers(entity)`, `get_callees(entity)`.
+`list_dependencies(path)` in M7; `get_callees(entity)`, `get_callers(entity)` join in M8.
+
+A worked turn — *"How does a private repo get cloned with the user's token?"*:
+
+```
+1. code_search("clone private repo token")       fused lexical+semantic, unchanged
+   → worker/tasks.py:41-88 clone_repository · core/security.py:12-20 decrypt_token
+2. read_file("worker/tasks.py", 41, 88)          the agent wants the body
+   → sees decrypt_token(...), _basic_auth_header(...), subprocess.run(["git","clone",…])
+3. get_callees("clone_repository")               ONE graph call, one hop
+   → [decrypt_token      core/security.py:12-20    call_line 52,
+      _basic_auth_header worker/tasks.py:30-38     call_line 55,
+      release_index_lock core/redis_client.py:22-27 call_line 84]
+4. read_file("worker/tasks.py", 30, 38)          only the helper it needs
+5. answer, citing tasks.py:52, tasks.py:55, security.py:12-20
+```
+
+The graph is called at step 3 — *after* the agent has a location and asks "what's connected
+to this?" — never at step 1, where there is no location yet. It costs one small tool result
+instead of reading three files to discover the same three names. An exact-identifier
+question never reaches step 3. That is the agentic part: the graph is used only when the
+question's shape needs it, which is exactly what a fixed third RRF leg could not do.
 
 The loop is a **hand-rolled `StateGraph`**, not `create_react_agent`:
 
@@ -180,14 +209,16 @@ aren't enough.
 ## Build order & measurement
 
 Legs ship one at a time, and **each ends with a measured `recall@k` delta** against a pinned
-baseline — if several fused retrievers return junk you can't tell which is at fault.
+baseline — if several fused retrievers return junk you can't tell which is at fault. The
+graph is not a fused leg, so it is measured where it is used: on the M7 agent eval, tools on
+vs. off, plus an edge-quality eval of the resolved call graph itself.
 
 | Leg | Ships in | Cost to redo |
 |---|---|---|
 | Lexical | **M5** ✅ | trivial — one migration |
 | ~~Structural v1 (trigram)~~ | M4 → removed after M5 measurement | trivial |
 | Semantic | **M6** ✅ | re-embed the corpus |
-| Graph | **M7** | re-parse + re-resolve; no API cost |
+| Graph (agent tools, not fused) | **M8**, after the M7 agent | re-parse + re-resolve; no API cost |
 
 **M6 measured (2026-09-04, OpenAI `text-embedding-3-small`, all 46 questions, line-level):**
 
@@ -240,8 +271,8 @@ back. `--legs lexical` / `--legs lexical,semantic` ablate a leg in or out.
 0.85 / 0.93; fused (shipped, semantic 2×) 0.85 / 0.91.** Quote `@5`; at these repo sizes
 `@20` is a soft bar. The eval feeds **raw English** to `search()`,
 which the agent never will — it reformulates first — so the conceptual bucket is realistic for
-the search UI and pessimistic for the agent. M8 extends `run.py` to score agent-mediated
-retrieval alongside it.
+the search UI and pessimistic for the agent. M7 extends `run.py` to score agent-mediated
+retrieval alongside it; M8 re-runs that with the graph tools on and off.
 
 ## Build note
 

@@ -36,7 +36,7 @@ Nothing outside `core/ai` imports a provider SDK. Two switch points, both config
   vector space), so a live switch has no use case — a new provider is one more branch.
 - **Chat:** `DEFAULT_CHAT_PROVIDER` (`openai` | `anthropic`) →
   `core/ai/chat.py::get_chat_model(provider)`, a factory returning a ready LangChain chat
-  model — useful for testing the M8 agent loop against a different model.
+  model — useful for testing the M7 agent loop against a different model.
 
 | | Model | Notes |
 |---|---|---|

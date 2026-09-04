@@ -232,7 +232,7 @@ every point from one `$`-prefixed identifier the tokenizer mangles.
 justifies it" — a rule that cuts as readily as it admits.
 **Fix:** removed the module, the enum slot, the frontend fields, and the index (own migration);
 re-ran the eval to confirm 0.72/0.78 reproduced exactly. Noted precisely: this was
-symbol-**name** lookup, not graph traversal (M7), which is different data and unaffected.
+symbol-**name** lookup, not graph traversal (M8), which is different data and unaffected.
 
 ### A20. Free-tier quotas and a silent fallback made M6 unmeasurable
 
@@ -296,6 +296,28 @@ semantic-only — the weight where a leg stops mattering is itself measurable. S
 caveat: the eval feeds raw English, which flatters semantic; the agent will send
 identifier-shaped queries where the two legs tie. Numbers in `RETRIEVAL.md`.
 
+### A23. The graph leg couldn't be measured before the agent existed
+
+**Problem:** M7 was planned as a call graph fused into RRF as a third leg, ending with the
+same in/out `recall@k` ablation that cut A19. Pressed on *why* fusion, the design didn't
+hold: graph traversal takes a location and returns connected locations — that's
+reachability, not an estimate of query relevance, which is the one thing RRF assumes each
+leg provides. And a leg seeded from the other two isn't independent; it can only amplify
+their vote. Once the graph stops being a fused leg there is no `recall@k` to ablate — the
+only place its value shows up is inside the agent loop, and the agent didn't exist yet.
+**Why:** the build order had been written leg-by-leg ("each leg ends with a measured delta")
+and the graph got slotted in as a leg because that was the shape of the sentence, not
+because it was one.
+**Name:** measure-then-buy applied to milestone order; the LocAgent-style tools-on/off
+ablation.
+**How we solved it:** checked what the field does before rewriting anything — LARGER,
+RepoGraph, LocAgent, CodexGraph, Codebase-Memory, GraphRAG-Bench, CodeCompass, plus
+Sourcegraph, Augment, Greptile, Aider, Claude Code. Nobody fuses graph neighbours into a
+ranked list (B20). Swapped the milestones: the agent ships first with the tools that already
+exist (`code_search`, `read_file`, `list_dependencies`), producing an agent eval; the call
+graph lands after it as `get_callees`/`get_callers` and is measured on that eval with the
+tools on vs. off, plus an edge-quality eval of the resolved graph itself.
+
 ---
 
 ## B. Design decisions
@@ -358,7 +380,7 @@ no drift, one migration. Reaching for a search engine before outgrowing Postgres
 whole extra datastore for nothing at this scale.
 
 ### B10. Lexical retrieval first; embeddings last
-**Chose:** build order lexical (M5) → semantic (M6) → graph (M7). **Alternative:**
+**Chose:** build order lexical (M5) → semantic (M6) → agent (M7) → graph tools (M8). **Alternative:**
 vector-first RAG. **Why:** code is mostly identifiers, and the identifier you want is usually
 literally in the file — exact match wins whenever an exact match exists. Embeddings earn
 their keep only where the user's words appear *nowhere* in the code — real, important, a
@@ -409,7 +431,7 @@ never surfaced — a miss is unrecoverable, noise is not. Line-level next to fil
 "right file, wrong line" its own number. A SHA is content-addressed and immutable; a branch
 moves the line numbers out from under the answer keys. The eval feeds *raw English* to
 `search()`, which the agent never will (it reformulates first) — so the conceptual bucket is
-honest for the search UI and pessimistic for the agent; M8 scores agent-mediated retrieval
+honest for the search UI and pessimistic for the agent; M7 scores agent-mediated retrieval
 alongside.
 
 ### B16. Agentic RAG with a hand-rolled LangGraph `StateGraph`
@@ -421,14 +443,12 @@ would be deleted a week after the tools existed. Hand-rolling is the deliberate 
 citation-collection node and repo-map priming are plain code, and so the loop can be
 explained end to end. Citations come from tool-result metadata, never from the model.
 
-### B17. Seeded graph expansion as a third fusion leg (accepted coupling)
-**Chose:** walk `reference_edge ∪ dependency_edge` outward from the top lexical + semantic
-hits and fuse the result in. **Alternative:** graph traversal only as agent tools. **Why:**
-traversal has no notion of query relevance, so seeding is the only way into a single fused
-ranking. The honest cost: a wrong seed is *reinforced* by its neighbours instead of cancelled
-by an independent leg — the opposite of what RRF over independent retrievers buys. Accepted
-because M7 ends with the same in/out ablation that cut A19; if coupling costs more than it
-gains, the number shows it.
+### B17. ~~Seeded graph expansion as a third fusion leg (accepted coupling)~~ — superseded by B20
+**Chose (then):** walk `reference_edge ∪ dependency_edge` outward from the top lexical +
+semantic hits and fuse the result in, accepting that a wrong seed gets reinforced rather than
+cancelled. **Reversed 2026-09-04** before any code: the "traversal has no notion of query
+relevance" sentence in the rationale was the argument *against* fusing it, not for. Kept
+here because the reversal is the interesting part — see A23 and B20.
 
 ### B18. Paid OpenAI embeddings over Gemini's free tier
 **Chose:** `text-embedding-3-small`, `EMBEDDING_PROVIDER` + one key as the whole switch.
@@ -448,3 +468,24 @@ need `api` and `worker` scaling independently yet. Terraform over console clicks
 reproducible, destroyable. What changes the answer: worker queue depth or API latency that
 one instance can't absorb — at that point split the worker into its own instance/service and
 move Postgres to RDS first (it's the only durable state).
+
+### B20. The call graph is agent tools, not an RRF leg — and ships after the agent
+**Chose:** fusion stays lexical + semantic. The graph is exposed as `list_dependencies`,
+`get_callees`, `get_callers` — one hop per call, each edge carrying a resolution confidence
+(same file 0.9 → imported file 0.85 → unique name 0.7 → ambiguous 0.3) so tools can filter
+the ambiguous tail. The agent, not a fixed pipeline, decides when to hop. **Alternative:**
+the B17 seeded third leg; or a LARGER-style sidecar that attaches 1-hop neighbours to each
+`/search` hit (deferred until the agent eval shows a need). **Why:** RRF combines independent
+relevance estimates; hop distance is a property of the seed, not the query, and a seeded leg
+can only amplify the other two. Whether a neighbour matters depends on the question — zero
+hops for "where is X defined", several for "how does auth flow" — which only an agent can
+judge per query. The field agrees: LARGER attaches neighbours to the anchoring hit and never
+re-ranks; RepoGraph found 1-hop best and 2-hop worst; LocAgent's `TraverseGraph` tool is
+worth +4 pts next to keyword search's +13; Augment keeps its call graph as a "structural
+reachability" index beside BM25 and vectors; GraphRAG-Bench shows graphs *lose* on simple
+lookups. Honest scope: keyword search already finds a name's call sites, so `get_callers`
+mostly adds the enclosing caller; `get_callees` is the genuinely new capability. **Order:**
+agent first (M7) with the tools that already exist, because the graph's value can only be
+measured inside the loop — tools on vs. off on the agent eval (M8). What changes the answer:
+the agent eval showing the conceptual bucket still failing on multi-hop questions with the
+tools present — that's the trigger for the sidecar, or for a real reranker.

@@ -15,8 +15,14 @@ becomes searchable minutes into indexing rather than only when the slowest stage
 **One retrieval leg at a time, and each one ends with a measured `recall@k` delta.** If
 several fused retrievers return junk you cannot tell which one is at fault, so every leg
 lands against a clean pinned baseline. That's what made the structural ablation possible in
-M5, and it's what makes M6 and M7 each reportable as its own delta instead of one vague
-"retrieval got better."
+M5, and it's what made M6 reportable as its own delta instead of a vague "retrieval got
+better."
+
+**The graph is not a fused leg, so it ships *after* the agent.** Graph traversal answers
+"what's connected to this location?", not "what's relevant to this query?" — it's exposed as
+tools the agent calls, never voted into RRF (`RETRIEVAL.md`). The only place it can be
+measured is inside the agent loop (tools on vs. off), so building it before the agent would
+mean shipping it unmeasured. Agent first, graph second.
 
 Cost order got us here — lexical was cheap to build and cheap to throw away, so it went
 first and the eval set landed before pgvector. That worked: `file.content` is persisted at
@@ -35,7 +41,8 @@ stops being a *gate* and goes back to being a *scoreboard*.
 search + AST chunking · **M6 provider layer + semantic leg — measured 2026-09-04** on OpenAI
 after the Gemini free tier blocked the first attempt (`CONCEPTS.md` A20): semantic-only
 `recall@5` 0.85 vs the 0.72 lexical baseline; fused 0.85 / 0.91 after re-tuning RRF to
-`k=10` with a 2× semantic weight (A22) — beating either leg alone. **Next up: M7.**
+`k=10` with a 2× semantic weight (A22) — beating either leg alone. **Next up: M7 — the
+agent.** (The call graph moved behind it on 2026-09-04 — `CONCEPTS.md` B20.)
 
 Per-milestone writeups live in `LEARNING_LOG.md`.
 
@@ -63,10 +70,10 @@ Per-milestone writeups live in `LEARNING_LOG.md`.
      0.72 / `recall@20` 0.78**. (0.76 / 0.81 was the pre-removal hybrid number — don't quote
      it as the current one.)
 
-6. ~~**Provider layer + the semantic leg.**~~ **Code done, measurement pending.**
+6. ~~**Provider layer + the semantic leg.**~~ **Done — measured 2026-09-04.**
    `core/ai` (the only module that imports any provider SDK — OpenAI `text-embedding-3-small`
    for embeddings behind an `EMBEDDING_PROVIDER` switch, plus a chat factory covering
-   OpenAI/Anthropic for M8 testing) with a resumable embedding client.
+   OpenAI/Anthropic for M7 testing) with a resumable embedding client.
    `chunk.embedding vector(1536)` — **no index** in V1, exact cosine scan instead (see
    `DATA_MODEL.md`'s deferred-and-why) — an `embedding` pipeline stage (non-fatal on
    failure, see `WORKFLOW.md`), and `semantic_search()` fused with lexical via the RRF
@@ -77,21 +84,16 @@ Per-milestone writeups live in `LEARNING_LOG.md`.
    overall 0.72 → 0.85. Fusion needed two measured fixes to beat semantic alone (`k=10`,
    semantic weighted 2×) — see `RETRIEVAL.md`.
 
-7. **The graph leg.** Call-graph extraction — a second Tree-sitter walk that *does* descend
-   into function bodies (the existing one deliberately stops there), resolving callee names
-   against the symbol table into a new `reference_edge` table. Then `expand(seeds, max_hops)`
-   over `reference_edge ∪ dependency_edge`, seeded from the top lexical + semantic hits and
-   fused in as a third RRF leg — and the same traversal exposed as `get_callers` /
-   `get_callees` / `list_dependencies` agent tools.
-   **Ends with an in/out ablation**, the same one that cut structural retrieval in M5.
-
-8. **The agent.** Repo map (PageRank-ranked, AI-free table of contents from `code_entity` +
+7. **The agent.** Three tools, all of which exist or are free today: `code_search` (the
+   fused `search()`), `read_file`, `list_dependencies` (over the `dependency_edge` table M4
+   built). Repo map (PageRank-ranked, AI-free table of contents from `code_entity` +
    `dependency_edge`, in the stable prompt prefix so the first move is informed rather than a
    blind keyword guess) + a **hand-rolled LangGraph `StateGraph`** — we write the state,
    `call_model`, `ToolNode`, and the `should_continue` edge; LangGraph only runs the graph.
    Streamed over SSE with tool-call status, citations built from tool-result metadata. Chat
    UI reuses the existing citation → Monaco overlay path. Extends `eval/run.py` to score
-   agent-mediated retrieval (checkpointed per question, so an interrupted run resumes).
+   agent-mediated retrieval (checkpointed per question, so an interrupted run resumes) —
+   **that agent eval is the baseline M8 is measured against.**
    - **Two hallucination-mitigation steps, both cheap.** A CRAG-style retrieval grade runs
      right after each tool call, before that result reaches the model: junk/irrelevant tool
      output triggers a re-search instead of being handed to `call_model` to generate from. A
@@ -102,12 +104,24 @@ Per-milestone writeups live in `LEARNING_LOG.md`.
      LLM-judge faithfulness check (a real SOTA option) is deliberately deferred until the eval
      shows these two aren't enough.
 
+8. **The call graph, as agent tools.** A second Tree-sitter walk that *does* descend into
+   function bodies (the symbol-table walk deliberately stops there) extracts call sites;
+   callee names resolve against the symbol table into `reference_edge`, each edge carrying a
+   **confidence** from its resolution tier (same file → imported file → unique repo-wide →
+   ambiguous). Exposed as `get_callees(entity)` and `get_callers(entity)` — one hop per
+   call; the agent hops again if it wants to. **Never a fused leg** — `RETRIEVAL.md` has the
+   research and the reasoning.
+   **Measured two ways:** an edge-quality eval (hand-labelled call sites at the pinned
+   `noetra` SHA → precision/recall of resolved edges), and the M7 agent eval run with the
+   graph tools on vs. off — the LocAgent-style ablation, which is the only place the graph's
+   value actually shows up.
+
 9. **Basic metrics + dashboard.** `metrics` pipeline stage; status finally reaches `READY`.
 
 ## Two naming traps
 
 **"Structural" is overloaded.** The thing **cut** in M5 was trigram symbol-*name* lookup
-over `code_entity`. The thing being **built** in M7 is graph *traversal* over call and import
+over `code_entity`. The thing being **built** in M8 is graph *traversal* over call and import
 edges — different data, different input (a location, not a query), never built at any layer.
 The M5 cut decision doesn't apply to it. See `RETRIEVAL.md`'s decision record.
 

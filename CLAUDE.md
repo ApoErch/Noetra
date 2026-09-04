@@ -21,9 +21,10 @@ and inform me when something *is* the standard.
 1. GitHub OAuth login
 2. Repo import: public URL (plain clone) or private repo (clone with the user's decrypted token)
 3. Background indexing pipeline: (clone+lexical index → parse+symbols → graph → chunk → embed → metrics)
-4. Agentic RAG: three retrieval legs (lexical + semantic, RRF-fused, plus graph
-traversal) driven by an agent that picks its own strategy per query. Also a **retrieval eval
-set** that keeps all three honest
+4. Agentic RAG: lexical + semantic retrieval, RRF-fused, plus graph tools the agent calls
+(`list_dependencies`, `get_callees`, `get_callers` — never fused), driven by an agent that
+picks its own strategy per query. Also a **retrieval eval set** that keeps the fused legs
+honest and an agent eval that measures the tools
 5. Streamed LangGraph chat agent with citations
 6. basic dashboard (files, functions, LOC, language breakdown, largest files).
 Languages at launch: Python, JavaScript, TypeScript. Nothing else.

@@ -57,13 +57,14 @@ pgvector keeps embeddings in the same DB — no second datastore in V1.
 - `core/github` — the only place that talks to git/GitHub.
 - `core/ai` — the only place that imports any AI provider's SDK. Embeddings via
   `EMBEDDING_PROVIDER` (`embed_documents`/`embed_query`, OpenAI); chat via
-  `get_chat_model(provider)` (default OpenAI, Anthropic available for testing the M8
+  `get_chat_model(provider)` (default OpenAI, Anthropic available for testing the M7
   agent). Two narrow interfaces — "generate a streamed completion given messages + tools"
   and "embed these strings" — which is the entire cost of switching providers later. It
   also owns the one provider-shaped detail that would otherwise leak outward: truncating
   input to the embedding model's cap, because the API rejects over-long text.
-- `core/retrieval` — the three retrieval legs + RRF fusion (`RETRIEVAL.md`). Used by both
-  the search endpoint and the agent tools. No retrieval logic lives anywhere else.
+- `core/retrieval` — the two fused retrieval legs (lexical + semantic, RRF) and the graph
+  tool functions (`RETRIEVAL.md`). Used by both the search endpoint and the agent tools. No
+  retrieval logic lives anywhere else.
 - `core/agent` — the hand-rolled LangGraph `StateGraph`, the tool definitions, and the
   repo map.
 - `indexer` — Tree-sitter parsing, AST chunking, symbol extraction, import + call graph
