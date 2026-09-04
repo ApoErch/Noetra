@@ -9,21 +9,16 @@ from core.models import Chunk, Repository, RepositoryStatus
 
 logger = get_task_logger(__name__)
 
-# How many unembedded chunks to pull per DB round trip. core/ai's own batching further
-# splits this into API-request-sized pieces by token budget — this is just the page size
-# for "how much work to grab before pacing," not the size of any single Gemini request.
+# Unembedded chunks per DB round trip — and, since core/ai sends a page as one request,
+# the number of inputs per API call (well under OpenAI's 2,048-inputs-per-request cap).
 _PAGE_SIZE = 200
-# Sleep between pages so a big repo doesn't fire requests back-to-back and blow through
-# the per-minute quota. Backoff (in core/ai) reacts to a 429 already happening; this is
-# what avoids triggering it in the first place.
-_PACE_SECONDS = 2.0
 
 
 def embed_repository(db: Session, repo: Repository) -> int:
     """Embed every chunk of `repo` missing an embedding; returns how many were embedded.
 
     Resumable by construction: selects WHERE embedding IS NULL and commits per page, so
-    re-running after a crash or an exhausted retry continues from wherever it stopped
+    re-running after a crash or provider failure continues from wherever it stopped
     instead of re-embedding chunks that already succeeded.
     """
     repo.status = RepositoryStatus.EMBEDDING
@@ -42,7 +37,7 @@ def embed_repository(db: Session, repo: Repository) -> int:
 
         page_start = time.perf_counter()
         vectors = embed_documents([chunk.embed_text for chunk in chunks])
-        for chunk, vector in zip(chunks, vectors):
+        for chunk, vector in zip(chunks, vectors, strict=True):
             chunk.embedding = vector
         db.commit()  # per-page commit — a crash mid-repo keeps every page already done
 
@@ -51,7 +46,6 @@ def embed_repository(db: Session, repo: Repository) -> int:
             "repo %s: embedded %d chunks in %.2fs (%d so far)",
             repo.id, len(chunks), time.perf_counter() - page_start, total,
         )
-        time.sleep(_PACE_SECONDS)
 
     logger.info("repo %s: embedding stage took %.2fs (%d chunks)", repo.id, time.perf_counter() - stage_start, total)
     return total

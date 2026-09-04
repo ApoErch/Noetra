@@ -108,7 +108,7 @@ def clone_repository(repository_id: str) -> None:
         index_repository_files(db, repo, dest)
 
         # Embedding is the first stage that can fail for reasons that are not the
-        # repo's fault (a rate limit, a quota blip) rather than something really
+        # repo's fault (a provider outage, a bad API key) rather than something really
         # wrong with the repo. Every earlier stage is deterministic and local, so
         # letting its exception hit the `except` below and mark the repo FAILED is
         # correct there — it would not be correct here, since it would brick a

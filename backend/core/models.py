@@ -150,7 +150,7 @@ class Chunk(Base):
     produces one per leaf entity plus gap chunks for everything between them.
 
     `embedding` is nullable on purpose: the M6 embedding stage selects
-    `WHERE embedding IS NULL`, so a 429 partway through a repo resumes instead of
+    `WHERE embedding IS NULL`, so a failure partway through a repo resumes instead of
     restarting, and a repo stuck mid-embed stays lexically searchable throughout.
     """
 
@@ -180,8 +180,9 @@ class Chunk(Base):
         Computed("to_tsvector('english', coalesce(embed_text, ''))", persisted=True),
         nullable=True,
     )
-    # 1536 = gemini-embedding-001 truncated from its native 3072 (Matryoshka) — pgvector's
-    # HNSW index caps the `vector` type at 2000 dims, and 3072 would force `halfvec`.
+    # 1536 = text-embedding-3-small's native size (also under pgvector's 2000-dim cap for
+    # indexing the plain `vector` type, should an ANN index ever be added). Changing the
+    # embedding model means a migration here plus a full re-embed.
     # Explicit Vector(1536) type means the `list[float] | None` annotation is never
     # consulted, so no `type_annotation_map` entry or `# type: ignore` is needed.
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
