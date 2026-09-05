@@ -498,3 +498,107 @@ measured with `eval.agent` tools on vs off against the table in `RETRIEVAL.md`.
 - Prompt: no process narration, no closing offers, no spaces in citation brackets; verifier
   tolerates and normalises them (`4fca4f3`, tests `ca5cec4`).
 - Dev server and background tasks stopped at session end; containers left running.
+
+---
+
+## Session — 2026-09-06 02:08
+
+**Worked on:** Milestone 8 — the call graph as an agent tool. Researched, planned, built,
+measured, documented. Six commits on `develop` (`fd038ec`…`a3ad27f`). **M8 is closed.**
+
+**Done:**
+- **Research pass first** (the user asked for it before any plan): LocAgent, RepoGraph, ARISE,
+  Codebase-Memory, LARGER, SWE-QA, plus Sourcegraph/SCIP, GitHub stack-graphs, Serena/LSP,
+  aider. Findings that changed the plan are in `CONCEPTS.md` A28–A31 / B24–B27.
+- **Fixed the measurement before building.** The M7 eval was saturated (0.91, ~1 question of
+  real headroom, no question asking for a *set* of locations), so an on/off ablation would
+  have returned noise. Added `QuestionKind.GRAPH` + 12 enumeration questions (52 answer
+  locations, noetra 6 / requests 4 / zod 2) and **coverage scoring** (`rcov`/`ccov`) to
+  `eval/agent.py`, since a boolean `cited` scores "2 of 5 call sites" as a win. Graph
+  questions are excluded from `eval.run` so the pinned 0.85/0.91 retrieval baseline stays
+  comparable. Baseline with the 3 existing tools: **ccov 0.63**.
+- **`indexer/calls.py`** (pure, 16 tests): a second Tree-sitter walk that descends *into*
+  function bodies (node shapes probed live, not assumed), plus name-based resolution in tiers
+  — same file 0.9, one imported file 0.85, unique repo-wide 0.7. **No ambiguous tier**; an
+  ambiguous name resolves to nothing and does not fall through. `self.foo()` stops at the
+  current file; `x.foo()` is denied the repo-wide tier.
+- **`ReferenceEdge` model + migration `d7e8f9a0b1c2`** (verified with a throwaway
+  autogenerate — it proposed only the two known raw-SQL GIN drops), wired into
+  `worker/indexing.py` inside the existing `GRAPHING` stage, reusing the import edges just
+  resolved for the 0.85 tier. No new status enum, no extra pass over files.
+- **`find_references(symbol, direction)`** — one tool, not two (`CONCEPTS.md` B25), returning
+  chunk-aligned citable `RetrievalHit`s via `chunk.entity_id`. `AgentConfig.tools` +
+  `--no-graph-tools` make the ablation expressible; the prompt drops its guidance too, so a
+  tools-off run isn't an agent told to use a tool it lacks.
+- **Measured (same seed, `--kinds graph --repos all`, n=12):** tool off → on, `ccov`
+  **0.63 → 0.84**, `rcov` 0.82 → 0.91, cited 0.75 → 0.92, tool calls **−28%**, tokens
+  **−30%**. Per repo `ccov`: noetra 0.72 → 1.00, zod 0.33 → 0.83. No regression on the
+  original 46 (cited 0.91 → 0.89 = one question of variance).
+- **Edge quality by hand** at the pinned SHAs: `_get_owned_repository` 5/5, `acquire/release
+  _index_lock` 2/2 and 1/1, `request` 7/7, `finalizeIssue` 4/4. On `requests`, where `request`
+  is defined twice, **all 19 edges resolved to the correct definition** — `self.request()` in
+  `sessions.py` never leaked to `api.py`.
+- **Real bug found and fixed:** zod had **3 import edges for 1,411 entities**, twice
+  misdiagnosed in earlier sessions as "monorepo `@zod/*` aliases". Actual cause: TypeScript
+  `moduleResolution: NodeNext` imports the *emitted* path (`"./util.js"` for `util.ts`), which
+  `resolve_js_import` never stripped. Fixed → **405 import edges**, call edges 675 → 1,324,
+  confidence mix inverted. Had been degrading `list_dependencies` and the repo map for every
+  TS repo since M4. Committed separately (`1021efa`).
+- **Built, measured, reverted:** reference-weighted repo-map PageRank (aider's design). Graph
+  `ccov` 0.84 → 0.72, other 46 cited 0.89 → 0.87. Import edges count *breadth*, call edges
+  count *volume*, and orientation needs breadth — a test helper was promoted into the
+  token-capped top ten and evicted a real source file (`CONCEPTS.md` A31).
+- **Docs realigned:** `CONCEPTS.md` (A28–A31, B24–B27, B20 supersession note, A26 rewritten
+  as a deliberate hold), `LEARNING_LOG.md` (Milestone 8), `RETRIEVAL.md`, `DATA_MODEL.md`,
+  `BUILD_ORDER.md`, `FEATURES.md`, `WORKFLOW.md`, `ARCHITECTURE.md`, `SETUP.md`, `CLAUDE.md`.
+- 45 tests (was 23); ruff/mypy clean on everything touched.
+
+**In progress:** Nothing half-built. M8 is complete and measured.
+
+**Key decisions:**
+- **Build the measurement before the feature** → a saturated benchmark reports nothing either
+  way; the graph bucket + coverage metric had to exist first (A28/A29).
+- **Coverage alongside the booleans, not replacing them** → single-location keys make coverage
+  arithmetically identical to the boolean, so every historical number stays comparable and old
+  checkpoints backfill exactly.
+- **No ambiguous tier** → a wrong edge sends the agent to unrelated code; a missing one only
+  leaves it searching. ARISE's finding, confirmed on `requests`' duplicated `request` (B24).
+- **One `find_references` tool, not `get_callers` + `get_callees`** → shared implementation,
+  flat prompt prefix, and `list_dependencies` is in-repo proof the shape gets called correctly.
+- **Tree-sitter name matching over LSP/SCIP** → precise resolution needs a build or a per-repo
+  language server; we clone arbitrary repos with no deps installed. stack-graphs named as the
+  V2 upgrade path (B26).
+- **Its own question bucket** → judged on the old 46 the tool moves nothing and would have been
+  deleted; it adds a capability rather than improving one (B27).
+- **Narrow answer keys left as is** (user's call) → score quoted as a lower bound. A26 now
+  carries the trap: the `metadata.mdx` question is a `docs` guard-rail and must **not** be
+  widened, or the docs alarm silently stops firing.
+- **Bracket-strict citations left as is** (user's call) → loosening trades false negatives for
+  false positives.
+
+**Next step:** **M9 — metrics + dashboard**, the last V1 milestone: `metrics` pipeline stage,
+`metric` rows, an API endpoint, and the React dashboard (file/function counts, LOC, language
+breakdown, largest files). It is also the only thing that makes `status = READY` reachable —
+the pipeline currently terminates at `embedding`.
+
+**Watch out for:**
+- **`.env.example` has an uncommitted change** (`LANGSMITH_PROJECT` blanked) made outside this
+  session — revert or keep, but it is sitting in the working tree.
+- **LangSmith tracing was disabled by the user this session.** It had been pointing at the EU
+  endpoint, timing out from the container, flooding stderr and inflating the eval's seconds
+  column. Re-enable only with a reachable endpoint.
+- **Module-level call sites are dropped** — `reference_edge.from_entity_id` is not nullable, so
+  a JS/TS `export const x = f()` has no caller and is skipped. Caps one zod eval question at
+  `ccov` 0.67. Documented with its trigger in B24, `DATA_MODEL.md`, and the
+  `enclosing_entity_index` docstring. Deliberate, not an oversight.
+- **Re-seeding is mandatory after any change to `indexer/calls.py`** — edges are built at index
+  time (`eval.seed --force --repos all`, ~2 min, a few cents).
+- **`eval/out/*.jsonl` now holds five tags** from this session (`m8-graph-baseline`,
+  `m8-graph-on`, `m8-graph-off`, `m8-regression`, `m8-refmap`) — re-scoring against widened
+  keys needs no API calls.
+- Git Bash heredocs with quoted bodies still fail intermittently on this machine; write scripts
+  to a file (Write tool) and run them. Python on Windows does not see Git Bash's `/tmp` — use
+  the scratchpad path.
+- Docker Desktop crashed mid-session and had to be restarted; containers were left running.
+- Pre-existing, untouched: 3 ruff findings (`api/auth.py`, init migration), mypy celery stubs
+  and `core/github.py:70`, `retry_repository` still only accepts `FAILED`.
