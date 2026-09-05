@@ -140,6 +140,11 @@ def verify(state: AgentState) -> dict[str, Any]:
     """Final node: keep only citations backed by this turn's tool results."""
     last = state["messages"][-1]
     text = last.content if isinstance(last.content, str) else str(last.content)
+    if not text.strip():
+        # A content-filter refusal comes back with empty `content` and the reason in
+        # `additional_kwargs["refusal"]`; without this the UI showed a blank bubble.
+        refusal = last.additional_kwargs.get("refusal") if isinstance(last, AIMessage) else None
+        text = refusal or "I can't respond to that. Ask me something about this repository's code."
     result = verify_citations(text, state.get("hits", []))
     if result.stripped:
         logger.info("stripped %d unbacked citations: %s", len(result.stripped), result.stripped)

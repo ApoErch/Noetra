@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import Markdown from 'react-markdown'
+import Markdown, { defaultUrlTransform } from 'react-markdown'
 import { formatCitation, type Citation, type ToolStep } from '../lib/chat'
 
 type Props = {
@@ -32,6 +32,9 @@ function linkifyCitations(content: string, citations: Citation[]): string {
 /** One chat message: markdown answer with clickable citations, plus the tool steps behind it. */
 export function MessageBubble({ role, content, citations, toolTrace, streaming, onOpenCitation }: Props) {
   const byKey = new Map(citations.map((c) => [formatCitation(c), c]))
+  // Citations render inline, next to the sentence they support. The chip row below is only a
+  // fallback for an answer that has citations but wrote none inline (older models do this).
+  const inlineCount = citations.filter((c) => content.includes(`[${formatCitation(c)}]`)).length
 
   if (role === 'user') {
     return (
@@ -49,6 +52,9 @@ export function MessageBubble({ role, content, citations, toolTrace, streaming, 
       {(content || !streaming) && (
         <div className="prose-chat max-w-none text-sm leading-relaxed text-zinc-200">
           <Markdown
+            // react-markdown drops hrefs with unknown schemes by default, which turned our
+            // citation links into href="" — a click then reloaded the app to the dashboard.
+            urlTransform={(url) => (url.startsWith(CITATION_SCHEME) ? url : defaultUrlTransform(url))}
             components={{
               a: ({ href, children }) => {
                 if (href?.startsWith(CITATION_SCHEME)) {
@@ -87,7 +93,7 @@ export function MessageBubble({ role, content, citations, toolTrace, streaming, 
       {streaming && !content && toolTrace.length === 0 && (
         <p className="text-sm text-zinc-500">Thinking…</p>
       )}
-      {!streaming && citations.length > 0 && (
+      {!streaming && citations.length > 0 && inlineCount === 0 && (
         <div className="flex flex-wrap gap-1.5 pt-1">
           {citations.map((c) => (
             <CitationChip key={formatCitation(c)} label={formatCitation(c)} onClick={() => onOpenCitation(c)} />

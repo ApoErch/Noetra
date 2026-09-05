@@ -8,6 +8,7 @@ It only reads the DB; nothing here touches a cloned repo on disk.
 import json
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -218,11 +219,14 @@ def _persist_answer(session: Session, conversation_id: uuid.UUID, result: TurnRe
         content=result.answer,
         citations=[c.model_dump(mode="json") for c in result.citations],
         tool_trace=[dict(t) for t in result.tool_trace],
+        # Explicit: the streaming session's transaction began when the turn started, so
+        # `now()` would put the answer at the same instant as the question.
+        created_at=datetime.now(UTC),
     )
     session.add(message)
     conv = session.get(ChatConversation, conversation_id)
     if conv is not None:
-        conv.updated_at = message.created_at or conv.updated_at
+        conv.updated_at = message.created_at
         session.add(conv)
     session.commit()
     return message.id
