@@ -64,3 +64,17 @@ def test_prose_without_citations_is_untouched() -> None:
     result = verify_citations(text, [])
     assert result.text == text
     assert result.citations == [] and result.stripped == []
+
+
+def test_spaces_inside_brackets_are_tolerated_and_normalised() -> None:
+    """`[ a/b.py:12-20 ]` is a formatting slip, not a fabrication: kept, and rewritten without spaces."""
+    hits = [_hit("a/b.py", 10, 40)]
+    result = verify_citations("See [ a/b.py:12-20 ].", hits)
+    assert result.text == "See [a/b.py:12-20]."
+    assert len(result.citations) == 1 and result.stripped == []
+
+
+def test_backed_range_written_reversed_is_normalised_in_text() -> None:
+    """The kept text uses the normalised range so the UI's regex matches what it links."""
+    hits = [_hit("a.py", 1, 100)]
+    assert verify_citations("[a.py:30-20]", hits).text == "[a.py:20-30]"
