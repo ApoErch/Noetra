@@ -4,13 +4,13 @@ import { apiFetch } from '../lib/api'
 import { buildFileTree, type FileEntry, type TreeNode } from '../lib/tree'
 import { FileTree } from './FileTree'
 import { FileOverlay } from './FileOverlay'
-import { SearchPanel } from './SearchPanel'
-import type { SearchHit, ViewerTarget } from '../lib/search'
+import { ChatPanel } from './ChatPanel'
+import type { Citation, ViewerTarget } from '../lib/chat'
 import type { Repo } from './RepoList'
 
 type SelectedFile = Extract<TreeNode, { type: 'file' }>
 
-/** Repo workspace: search on the left-to-right main area, file tree in the sidebar, files opened as an overlay. */
+/** Repo workspace: chat in the main area, file tree in the sidebar, files opened as an overlay. */
 export function RepoExplorer({ repo, onBack }: { repo: Repo; onBack: () => void }) {
   // A single target drives the overlay, whether the file was opened from the tree (no
   // highlight) or by following a citation (highlighted range). One piece of state means the
@@ -27,11 +27,11 @@ export function RepoExplorer({ repo, onBack }: { repo: Repo; onBack: () => void 
   const openFromTree = (node: SelectedFile) =>
     setTarget({ fileId: node.id, path: node.path, isBinary: node.is_binary, highlight: null })
 
-  const openFromHit = (hit: SearchHit) =>
+  const openFromCitation = (hit: Citation) =>
     setTarget({
       fileId: hit.file_id,
       path: hit.path,
-      // A search hit doesn't carry is_binary — but only text files are chunked and indexed,
+      // A citation doesn't carry is_binary — but only text files are chunked and indexed,
       // so anything retrievable is previewable. Look it up anyway to stay honest if that changes.
       isBinary: files?.find((file) => file.id === hit.file_id)?.is_binary ?? false,
       highlight: { startLine: hit.start_line, endLine: hit.end_line, matchLine: hit.match_line },
@@ -61,7 +61,7 @@ export function RepoExplorer({ repo, onBack }: { repo: Repo; onBack: () => void 
           )}
         </div>
         <div className="flex-1 overflow-hidden">
-          <SearchPanel repoId={repo.id} onOpenHit={openFromHit} />
+          <ChatPanel repoId={repo.id} onOpenCitation={openFromCitation} />
         </div>
       </div>
 
