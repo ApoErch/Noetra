@@ -51,6 +51,11 @@ AGENT_REPO_MAP_TOKENS=1500         # token budget for the repo map in the agent 
 DEFAULT_CHAT_PROVIDER=openai       # openai | anthropic
 ANTHROPIC_API_KEY=                 # only if testing the chat agent against Anthropic
 ANTHROPIC_CHAT_MODEL=claude-sonnet-5
+# langsmith tracing (optional; see "Tracing" below)
+LANGSMITH_TRACING=false
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=noetra
 # app
 SESSION_SECRET=
 TOKEN_ENCRYPTION_KEY=          # Fernet key: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -116,6 +121,16 @@ The eval runs in `worker`, not `api` — it needs `git`, the DB, and the `.env` 
 time, not query time, so changing how either works means re-seeding before the numbers mean
 anything. Embedding is resumable (`WHERE embedding IS NULL`), so an interrupted seed
 continues on the next run; `--no-embed` skips it when only the chunker changed.
+
+## Tracing (LangSmith)
+
+Set `LANGSMITH_TRACING=true` plus the key and project in `.env`, then
+`docker compose up -d --force-recreate api worker` (a restart does not re-read `.env`).
+Nothing else: `langchain-core` picks the variables up and records every chat turn as one
+trace named `agent_turn` — each `call_model`, each tool call with its arguments and result,
+token usage, and latency — tagged with `repository_id` in the metadata. The eval
+(`eval.agent`) is traced the same way, so a bad answer in the scoreboard can be opened and
+read step by step. Off by default; it adds a network call per span.
 
 ## Notes
 

@@ -47,7 +47,14 @@ class AgentConfig:
 
     def runnable_config(self) -> RunnableConfig:
         """Wrap into the config object `graph.invoke`/`graph.stream` accept."""
-        return {"configurable": {"agent": self}, "recursion_limit": recursion_limit(self.budget)}
+        # run_name/metadata show up in LangSmith when LANGSMITH_TRACING is on — tracing itself
+        # needs no code, LangChain reads the LANGSMITH_* env vars and traces every call.
+        return {
+            "configurable": {"agent": self},
+            "recursion_limit": recursion_limit(self.budget),
+            "run_name": "agent_turn",
+            "metadata": {"repository_id": str(self.repository_id), "tool_budget": self.budget},
+        }
 
 
 def _agent_config(config: RunnableConfig) -> AgentConfig:
