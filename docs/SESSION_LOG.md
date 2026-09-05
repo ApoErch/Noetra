@@ -482,3 +482,19 @@ measured with `eval.agent` tools on vs off against the table in `RETRIEVAL.md`.
   a file and run them, or use the Write/Edit tools.
 - Pre-existing, untouched: 3 ruff findings (`api/auth.py`, init migration), mypy celery stubs +
   `core/github.py:70`.
+
+**Addendum (same session, after the handoff above — commits `f7303e8`…`ca5cec4`):**
+- Manual browser test passed; three chat issues found and fixed (`f7303e8`): blank bubbles on
+  OpenAI refusals (empty `content`, text in `refusal` → fallback line in `verify`); canned
+  off-topic replies (prompt now varies wording, suggests a map-drawn question); inline citation
+  links reloading the app (react-markdown drops unknown URL schemes → `urlTransform` keeps
+  `noetra-cite:`). Chip row now only shows when no citation is inline.
+- **Real bug found:** the user's `ApoErch/Noetra` import stalled at `embedding` — one 200-chunk
+  page exceeded OpenAI's 300k-tokens-per-request cap (400). `core/ai/embeddings.py` now
+  splits a page by token budget (`_MAX_REQUEST_TOKENS = 250_000`); the stalled repo was
+  resumed by hand (157 chunks). Hard size limit, not rate-limit machinery (`be5de44`).
+- LangSmith tracing: env-only (`LANGSMITH_*` in `.env.example`/SETUP.md), runs named
+  `agent_turn` with `repository_id` metadata (`b0c8dea`). Not yet confirmed in the LangSmith UI.
+- Prompt: no process narration, no closing offers, no spaces in citation brackets; verifier
+  tolerates and normalises them (`4fca4f3`, tests `ca5cec4`).
+- Dev server and background tasks stopped at session end; containers left running.
