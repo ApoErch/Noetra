@@ -368,10 +368,29 @@ pinned SHA and recording *the* location — one per question — and were valida
 path existence, never reviewed for completeness. A one-location key makes the score a lower
 bound: any correct answer elsewhere counts as a miss.
 **Name:** answer-key coverage; scores as lower bounds.
-**How we solved it:** not yet fixed (documented 2026-09-05). Fix is to add the verified
-alternative locations as extra `answers` entries — the YAML already allows several — and
-re-score the stored JSONL answers offline, no API cost. Guard against fitting the key to the
-model: only add a location after reading it and confirming it answers the question.
+**How we solved it:** reviewed 2026-09-06 and **deliberately left as is** — the score is
+quoted as a lower bound instead. The fix, when taken, is to add the verified alternative
+locations as extra `answers` entries (the YAML already allows several) and re-score the
+stored JSONL answers offline, no API cost.
+
+Two things to get right when doing it. **First, the rule has to be about the codebase, not
+the model** — widening a key because the model cited something is how a benchmark rots into
+accepting anything. The test: open the location, hide the answer, ask "does this answer the
+question as asked?" If yes it belonged in the key already and the key was written lazily.
+**Second, one of the three must not be widened at all.** "How do I attach metadata to a
+schema?" is a `docs` question, and that bucket exists as the alarm that fires if
+`_NON_SOURCE_RANK_FACTOR` is ever tuned hard enough to bury documentation
+(`RETRIEVAL.md` → Evaluation). Letting it also accept the source implementation would make it
+pass while docs are unreachable — silently disabling the guard-rail. Reword that one to ask
+for the docs specifically, or leave it failing; do not widen it.
+
+**Worth noting for the interview:** this only distorts the *scoreboard*, never the product.
+The citation verifier checks a citation against the ranges the tools returned that turn, not
+against the answer key — the key does not exist at runtime. Both the key's location and the
+model's alternative render as the same clickable chip opening the same Monaco view, so the
+user gets an equally good answer either way. That is the argument for widening: `cited` is a
+proxy for "the user got a clickable link to code that answers the question", and both
+satisfy it.
 
 ### A27. A single 884,000-character line blew past the model's request limit
 
