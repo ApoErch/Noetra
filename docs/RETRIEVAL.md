@@ -7,7 +7,7 @@ is only as good as what this returns.
 
 **Agentic** means retrieval is not a fixed pre-LLM step — the model calls it mid-reasoning and
 iterates. An exact identifier resolves in **one** `code_search` and never touches the vector
-index. A vague conceptual question may search, follow the top hit via `get_callees`, then
+index. A vague conceptual question may search, follow the top hit via `find_references`, then
 search again with better terms. That per-query branching is what separates it from
 RAG-with-extra-steps.
 
@@ -17,7 +17,7 @@ RAG-with-extra-steps.
 |---|---|---|
 | **Lexical** — Postgres full-text over chunk `embed_text` | identifiers, error strings, config keys | shipped (M5) |
 | **Semantic** — pgvector cosine over the same chunks | questions whose words appear *nowhere* in the code | shipped (M6), measured |
-| **Graph** — call + import edges, walked one hop at a time | "what does this call?", "who calls this?", "what does this import?" | agent tools (M8) — **not a fused leg** |
+| **Graph** — call + import edges, walked one hop at a time | "what does this call?", "who calls this?", "what does this import?" | shipped (M8), measured — agent tools, **not a fused leg** |
 
 **Lexical.** Two passes: strict `websearch_to_tsquery` (which AND-joins bare terms), then an
 OR-relaxed rewrite backfilling unused slots — strict hits keep their positions, so relaxation
@@ -114,14 +114,19 @@ in that context" after search. Aider uses it only to rank the repo map. GraphRAG
 noise; CodeCompass calls it the *navigation paradox* — rigid graph structure degrades agents.
 Pattern name for what we keep: **graph-augmented agentic retrieval**, not graph-fused search.
 
-**The tools.** `list_dependencies(path)` (M7 — free, `dependency_edge` exists),
-`get_callees(entity)`, `get_callers(entity)` (M8). One hop per call; the agent hops again
-if it wants to. Results are `RetrievalHit`s: an entity maps back to **its chunk** via
-`chunk.entity_id`, so the citation is the same chunk-aligned range every other tool emits,
-with `match_line` = the call site. Honest note: keyword search of a name already finds its
-call *sites*, so `get_callers`' added value is naming the **enclosing caller** and filtering
-mentions in strings/comments; `get_callees` is the genuinely new capability — the reverse
-direction keyword search can't do without reading the body and searching each name.
+**The tools.** `list_dependencies(path, direction)` (M7 — free, `dependency_edge` exists)
+and **`find_references(symbol, direction)`** (M8) — one tool with a `callers`/`callees`
+parameter rather than two, mirroring `list_dependencies`' shape and matching how LocAgent
+(`TraverseGraph`) and ARISE (`traverse_relations`) collapse direction (`CONCEPTS.md` B25).
+One hop per call; the agent hops again if it wants to. Results are `RetrievalHit`s: an entity
+maps back to **its chunk** via `chunk.entity_id`, so the citation is the same chunk-aligned
+range every other tool emits, with `match_line` = the call site.
+
+**Why it beats search at this, concretely.** `code_search` caps at `MAX_CHUNKS_PER_FILE = 2`
+(`core/retrieval/types.py`), applied per leg *and* again after fusion. So it can never return
+more than two locations from one file — "list every call site in this module" is out of reach
+by construction, not by ranking. `find_references` returns the complete set, and knows *which*
+`request` you meant when a repo defines the name twice.
 
 ## Fusion
 
@@ -159,8 +164,9 @@ Retrievers are exposed as **tools** the model calls in a loop (`core/agent/tools
 | `code_search(query)` | ≤10 lines of `path:start-end · snippet [lexical,semantic]` | the fused `search()`; 10 not 20 — the agent can search again, and every junk line is context it carries |
 | `read_file(path, start?, end?)` | numbered `NN\| code` lines, **≤200 per call** | the read range becomes citable; unknown path → "did you mean" from the repo's paths |
 | `list_dependencies(path, direction)` | paths | `imports` or `imported_by`, over `dependency_edge` |
+| `find_references(symbol, direction)` | ≤30 lines of `path:start-end · caller — calls X at line N` | `callers` or `callees`, over `reference_edge`; the complete set, not a ranked sample |
 
-`get_callees` / `get_callers` join in M8. Every tool result line carries `path:start-end`
+Every tool result line carries `path:start-end`
 — **that** is where citations come from; the model is told to cite only ranges it saw.
 
 Two real turns from the eval:
@@ -180,7 +186,7 @@ How does the app stop two indexing jobs running for the same repository at once?
 
 An identifier question ends after one search. An off-topic question ("write me a poem")
 ends with zero tool calls, because the system prompt says to decline and redirect — that is
-the whole "router". The graph tool (M8) will be called only once the agent *has* a location
+the whole "router". The graph tool is called only once the agent *has* a location
 and asks what is connected to it, never at step 1.
 
 The loop is a **hand-rolled `StateGraph`** (`core/agent/graph.py`), not `create_react_agent`:
@@ -251,7 +257,7 @@ vs. off, plus an edge-quality eval of the resolved call graph itself.
 | ~~Structural v1 (trigram)~~ | M4 → removed after M5 measurement | trivial |
 | Semantic | **M6** ✅ | re-embed the corpus |
 | Agent (M7) ✅ | **M7** — measured 2026-09-05 | prompt/tool edits; re-run `eval.agent` |
-| Graph (agent tools, not fused) | **M8**, after the M7 agent | re-parse + re-resolve; no API cost |
+| Graph (agent tools, not fused) ✅ | **M8** — measured 2026-09-06 | re-parse + re-resolve; no API cost |
 
 **M7 agent eval (2026-09-05, all 46 questions, `eval.agent --repos all`):** *retrieved* = a
 tool returned a range overlapping the answer key; *cited* = a citation that survived the
@@ -291,7 +297,35 @@ verifier overlaps it — i.e. the user got a clickable link to the right code.
    question from its own memory with zero tool calls. That is the one failure this product
    must never show, and the map is the cheapest known fix.
 
-This table is the baseline M8's tools-on/off ablation is measured against.
+**M8 graph tool (2026-09-06, `eval.agent --kinds graph --repos all`, n=12).** The 46
+questions above could not measure this: they were saturated at 0.91 with ~1 question of real
+headroom, and none of them asks for a *set* of locations (`CONCEPTS.md` A28). A fifth question
+kind, `graph`, was written first — enumeration questions whose keys list **every** correct
+location, scored on **coverage** (`ccov`) rather than a boolean, because naming two of five
+call sites is a wrong answer the boolean records as a win (A29).
+
+| run | retrieved | cited | rcov | **ccov** | calls/q | tokens/q |
+|---|---|---|---|---|---|---|
+| 3 tools (`find_references` off) | 0.92 | 0.75 | 0.82 | **0.63** | 5.8 | 15.7k |
+| **4 tools (shipped)** | **1.00** | **0.92** | **0.91** | **0.84** | **4.2** | **10.9k** |
+
+**+0.21 coverage while cutting tool calls 28 % and tokens 30 %** — better answers *and*
+cheaper, which is the efficiency result Codebase-Memory reports for graph tooling. Per repo,
+`ccov`: noetra 0.72 → 1.00, zod 0.33 → 0.83. The mechanism, on one question — *"list every
+call site of `_get_owned_repository`"*: without the tool, 3 calls, retrieved but never cited
+(the per-file cap returns 2 of 5); with it, **1 call**, all five cited.
+
+On the original 46 the tool changes nothing (`cited` 0.91 → 0.89, one question of variance) —
+correct, not disappointing: it adds a capability rather than improving an existing one, which
+is why it needed its own bucket (`CONCEPTS.md` B27). Read the headline delta only; sub-rows
+like `requests` (n=4) are noise.
+
+**Also measured and rejected:** feeding call edges into the repo map's PageRank (aider's
+design). Graph `ccov` 0.84 → 0.72, the other 46 `cited` 0.89 → 0.87 — reverted. Import edges
+count **breadth** (how many distinct files depend on this), call edges count **volume** (how
+many times it is invoked), and orientation needs breadth: a test helper called often from few
+files was promoted into the token-capped top ten and evicted a real source file
+(`CONCEPTS.md` A31).
 
 **M6 measured (2026-09-04, OpenAI `text-embedding-3-small`, all 46 questions, line-level):**
 
@@ -345,8 +379,8 @@ back. `--legs lexical` / `--legs lexical,semantic` ablate a leg in or out.
 `@20` is a soft bar. The eval feeds **raw English** to `search()`,
 which the agent never will — it reformulates first — so the conceptual bucket is pessimistic
 for the agent. `eval/agent.py` scores the agent itself (retrieved / cited / cost per question,
-checkpointed per question so an interrupted run resumes); M8 re-runs it with the graph tools
-on and off.
+checkpointed per question so an interrupted run resumes). A fifth kind, `graph`, scores the
+M8 tool — see below.
 
 ## Build note
 

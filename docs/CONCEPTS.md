@@ -386,6 +386,100 @@ because lexical matching doesn't care what a file is.
 160; the eval records a failed question instead of aborting, and its per-question JSONL
 checkpoint meant the restart re-used all 16 finished answers.
 
+### A28. The eval saturated, so M8 could not be measured against it
+
+**Problem:** `BUILD_ORDER.md` specified M8 as "build the call graph, then measure it on the
+M7 agent eval with the tools on vs. off". That eval sat at `cited` 0.91 over 46 questions,
+and A26 had already established three of the four misses were narrow answer keys rather than
+retrieval failures. Real headroom: roughly one question. Any tools-on/off delta would have
+been indistinguishable from run-to-run model variance — the feature would have shipped
+unmeasured, which is the exact failure the "graph ships after the agent" ordering (B20)
+existed to prevent.
+**Why:** a benchmark only measures what it contains. All 46 questions were `symbol`,
+`keyword`, `conceptual` or `docs` — shapes that `code_search` plus `read_file` already
+resolve in two or three calls. Not one of them asked for a *set* of locations, which is the
+only thing a call graph does better than search. The feature and the benchmark were testing
+different capabilities, so the benchmark was guaranteed to report nothing.
+**Name:** benchmark saturation / ceiling effect. Goodhart-adjacent: the number had stopped
+tracking the thing it was a proxy for.
+**Fix:** build the measurement before the feature. A fifth question kind, `graph` — 12
+enumeration questions ("every caller of X"; "what does Y invoke, and where is each defined")
+whose answer keys list *every* correct location — then score the existing three-tool agent on
+it to pin a baseline (`ccov` 0.63) before writing any extraction code. Only then was the tool
+worth building. The original 46 were demoted from target to no-regression guard, and are
+excluded from `eval.run` so the pinned 0.85/0.91 retrieval baseline stays comparable.
+**Transferable version:** when a new feature scores flat on an existing benchmark, first ask
+whether the benchmark can express the capability at all. A saturated metric doesn't say the
+feature is worthless; it says the metric is finished.
+
+### A29. A boolean "cited" scored a half-right answer as a win
+
+**Problem:** the first graph-bucket run scored `cited` 0.92 — statistically identical to the
+saturated 46 — which read as "the current agent already handles these". It did not. Answers
+were naming two of five call sites and being recorded as correct.
+**Why:** `cited` asks "does any verified citation overlap any answer location?". That is the
+right question when a key holds one location, which every question until now did. For an
+enumeration answer it is the wrong question: partial and complete answers are both `True`,
+and the metric has no way to tell "found one caller" from "found all five".
+**Name:** metric/task mismatch — the measure lost resolution exactly where the new capability
+lived. The same shape as reporting accuracy on a multi-label problem.
+**Fix:** added coverage (`rcov` / `ccov`) — the share of the *whole* answer key reached and
+cited — **alongside** the booleans rather than replacing them, so every historical number
+stays comparable. For a single-location key coverage is arithmetically identical to the
+boolean, which also means old checkpoints backfill exactly rather than approximately. The
+honest reading of that first run was `ccov` 0.63, and the report now prints a "cited but
+incomplete" section listing every answer the boolean flatters. Five of twelve were in it.
+
+### A30. A downstream feature exposed a two-session-old misdiagnosis
+
+**Problem:** zod resolved **3 import edges for 1,411 entities**. This was noticed twice in
+earlier sessions and both times attributed to "monorepo `@zod/*` alias/bare imports, expected,
+not a bug". Building the call graph made it load-bearing — the middle confidence tier is
+"defined in a file this one imports" — and the zod graph question scored 0/4.
+**Why:** the recorded diagnosis was never checked. The real cause is that TypeScript under
+`moduleResolution: NodeNext` requires importing the **emitted** path: source in `util.ts` is
+imported as `"./util.js"`. Our resolver took the specifier literally, looked for `util.js`,
+then `util.js.ts`, and resolved nothing. Nothing to do with monorepo aliases.
+**Name:** an unverified diagnosis hardening into documentation; a *silent* data-quality
+failure — the pipeline reported success while producing almost no edges.
+**Fix:** strip a JS output extension (`.js/.jsx/.mjs/.cjs`) and retry against the source
+extensions, with the literal path still winning when it exists. zod went **3 → 405 import
+edges**, call edges 675 → 1,324, and its confidence mix inverted (0.85 tier 0 → 786; the
+weak 0.7 tier 173 → 36). The zod graph question went 0/4 → 4/4. This had been silently
+degrading `list_dependencies` and the repo map's PageRank for every TypeScript repo since M4,
+not just the call graph.
+**Transferable version:** a "known limitation" with no measurement behind it is a guess. The
+tell was the number itself — 3 edges for 1,411 entities is not a limitation, it is a broken
+component, and the ratio said so from the start.
+
+### A31. The reference-weighted repo map: volume is not importance
+
+**Problem:** the plan called for feeding call edges into the repo map's PageRank instead of
+only import edges — aider's actual design, and free once `reference_edge` existed. Built,
+measured, and **reverted**: graph-bucket `ccov` 0.84 → 0.72, the other 46 `cited` 0.89 → 0.87.
+No bucket improved.
+**Why:** import edges and call edges measure different things. An import edge is emitted once
+per file pair, so it counts **breadth** — how many distinct parts of the system depend on
+this. A call edge is emitted once per call site, so it counts **volume** — how many times it
+is invoked. A logging helper called 200 times from 2 files scores enormously on volume and
+almost nothing on breadth; a session module called 20 times from 15 files is the reverse. For
+*orientation* — which is the map's entire job — breadth is the better proxy, because plumbing
+is where control passes through, not where answers live. The visible symptom: on `requests`,
+`tests/testserver/server.py` (many calls, few callers) jumped #18 → #9, and since the map is
+capped at 1,500 tokens, promoting it **evicted a real source file** from the list.
+**Name:** proxy-metric mismatch — optimising a ranking signal that correlates with the wrong
+property. Related: the map had little headroom to begin with (A25 showed its value is
+behavioural — keeping the model in "look it up" mode — not the precision of its top ten).
+**Fix:** reverted to import-only ranking. Recorded, not deleted: the plausible repair is
+excluding call edges that originate in test files, and the reason aider gets away with volume
+weighting is that it runs **personalised** PageRank biased toward the files already in the
+chat, re-ranked per request. Our map is built once per repo and shared by every question, so
+it has no such correction — a design difference that was glossed over when borrowing the idea.
+**Transferable version:** "free signal, why not add it" is not a reason. This cost one eval
+run to find out, which is cheap; shipping it would have quietly degraded every question.
+
+---
+
 ## B. Design decisions
 
 ### B1. FastAPI over Flask / Django
@@ -536,6 +630,9 @@ one instance can't absorb — at that point split the worker into its own instan
 move Postgres to RDS first (it's the only durable state).
 
 ### B20. The call graph is agent tools, not an RRF leg — and ships after the agent
+*(The core decision held and shipped in M8. Two details were superseded when it was built:
+the two tools became one — B25 — and the ambiguous 0.3 tier was dropped rather than filtered
+— B24.)*
 **Chose:** fusion stays lexical + semantic. The graph is exposed as `list_dependencies`,
 `get_callees`, `get_callers` — one hop per call, each edge carrying a resolution confidence
 (same file 0.9 → imported file 0.85 → unique name 0.7 → ambiguous 0.3) so tools can filter
@@ -598,3 +695,75 @@ faster (4 s vs 7 s per question). Per question that is ~1 ¢ vs ~0.5 ¢. Caveat:
 `[path:90-99]`, which the verifier rejects. Still a product failure (no clickable link),
 but a fairer comparison needs the verifier to accept bare `path:a-b` first. Config-only switch
 (`OPENAI_CHAT_MODEL`); `--model` on `eval.agent` re-runs the comparison.
+
+### B24. Precision over recall in call resolution — no ambiguous tier at all
+**Chose:** resolve a call name in tiers — same file (0.9), exactly one imported file (0.85),
+unique repo-wide (0.7) — and write **nothing** when a tier matches more than one candidate.
+No fall-through to a weaker tier either: a name defined twice in the calling file is not
+better explained by a match in a distant one. `self.foo()` stops at the current file (a
+missing match means inheritance, which name matching cannot follow), and `x.foo()` is denied
+the repo-wide tier entirely, because for a bare `foo()` the language's scoping rules mean the
+name had to be imported or local, whereas `x` could be any object at all and a same-named
+repo function is a coincidence.
+**Alternative:** the original `DATA_MODEL.md` spec — emit one row per candidate at
+confidence 0.3 and let tools filter at `>= 0.5`. **Why:** those rows would have been written,
+indexed, and never read by anything — dead data with a maintenance cost. More importantly the
+asymmetry runs one way: a wrong edge sends the agent to unrelated code and it answers from
+there; a missing edge only leaves it searching, which it is already good at. ARISE
+(arXiv 2605.03117) states it directly — "spurious call edges lead agents down incorrect paths
+and are more harmful than missing edges" — and resolves only unambiguous direct and qualified
+calls for the same reason. **Measured:** on `requests`, where `request` is defined twice
+(`api.py` module function and `Session.request`), all 19 resolved edges point at the correct
+one; `self.request()` inside `sessions.py` never leaks to `api.py`. Recall cost is real and
+visible: a module-level call (`export const parse = _parse(Err)`) has no enclosing entity and
+is dropped, which caps one zod eval question at `ccov` 0.67. **What changes the answer:**
+making `reference_edge.from_entity_id` nullable would recover module-level call sites — worth
+it if TypeScript repos become a priority, since `const x = f()` is idiomatic there and rare in
+Python. Type inference (or an LSP, B26) would remove the ambiguity rather than dropping it.
+
+### B25. One `find_references(symbol, direction)` tool, not `get_callers` + `get_callees`
+**Chose:** a single tool with a `direction: "callers" | "callees"` parameter, mirroring the
+existing `list_dependencies(path, direction)` that the model already uses correctly.
+**Alternative:** the two separate tools the docs originally specified. **Why:** every tool
+schema is permanent weight in the cached prompt prefix and one more bullet in the tool
+guidance, and the two directions share their entire implementation — the query differs by
+which side of the edge is joined. LocAgent (`TraverseGraph`) and ARISE (`traverse_relations`)
+both collapse direction into a parameter rather than multiplying tools. The counter-argument
+is real — separate names are more discoverable to the model — but `list_dependencies` is
+existing proof in this codebase that the parameterised shape gets called correctly.
+**What changes the answer:** eval traces showing the model picking the wrong `direction`, or
+never trying `callees`. That is a one-run A/B on `eval.agent` if it comes up.
+
+### B26. Tree-sitter name matching over LSP/SCIP precise resolution
+**Chose:** the "poor man's call graph" — Tree-sitter extracts call sites, names are matched
+against the symbol table in confidence tiers, no type inference. **Alternative:** compiler-
+accurate resolution: SCIP (Sourcegraph), stack-graphs (GitHub), or a live language server
+behind the tool the way Serena's `find_referencing_symbols` does it. **Why:** every precise
+option needs either a build or a per-repo language server. Noetra clones arbitrary repositories
+into a container with no dependencies installed — `pyright` or `tsserver` would need a venv or
+`node_modules` per repo, would add minutes per import, and would fail outright on a large share
+of them. Syntactic maps are cheap, local, and work on a repo that does not build, which is a
+meaningful fraction of what users import; they trade exactness for coverage. The trade is
+visible and bounded: the graph is approximate on purpose, because its only job is to orient an
+agent that then reads the real file. **What changes the answer:** measured edge precision
+falling below ~0.8, or a user base concentrated in one language where a single language server
+is worth operating. The upgrade path with the best fit is **stack-graphs** — it is the one
+precise design that needs no build step, being a declarative name-binding DSL layered on the
+Tree-sitter grammars we already use — at the cost of writing that DSL per language.
+
+### B27. The graph is a capability, not an improvement — so it needed its own question bucket
+**Chose:** measure `find_references` on a purpose-built `graph` bucket (n=12) and treat the
+original 46 purely as a no-regression guard. **Alternative:** the plan of record — judge it on
+the existing 46. **Why:** the two produce opposite conclusions. On the 46 the tool moves
+nothing (`cited` 0.91 → 0.89, one question of variance) because those questions ask "where is
+X" or "how does Y work", which one `code_search` answers; on the graph bucket it moves
+`ccov` **0.63 → 0.84** while cutting tool calls 28 % and tokens 30 %. Judged on the 46 alone
+the correct decision would have been to delete it. This is the general shape of evaluating a
+feature that *adds* a capability rather than *improving* an existing one: an aggregate metric
+averages the new capability away, and the honest report is per-bucket. It also matches what
+the literature finds — Codebase-Memory (31 repos) scored graph tooling *below* a file-exploring
+agent on general QA (83 % vs 92 %) while matching or beating it on graph-native queries at 10×
+fewer tokens, and LocAgent measured removing its graph tool at −4 points against −13 for
+removing keyword search. The graph is real and second-order. **What changes the answer:**
+nothing about the method; the bucket is n=12, so individual sub-rows (`requests`, n=4) are
+noise and only the headline delta should be quoted.

@@ -109,6 +109,8 @@ docker compose exec worker python -m eval.run --repos noetra,requests   # more r
 # agent eval (runs the real chat agent; ~1 cent per question; checkpointed per question)
 docker compose exec worker python -m eval.agent                       # baseline → eval/out/agent-baseline.jsonl
 docker compose exec worker python -m eval.agent --tag x --no-repo-map # ablation: no repo map
+docker compose exec worker python -m eval.agent --kinds graph --repos all      # the M8 bucket
+docker compose exec worker python -m eval.agent --kinds graph --no-graph-tools # ablation: no find_references
 docker compose exec worker python -m eval.agent --tag y --model gpt-4.1-mini   # model A/B
 docker compose exec worker python -m eval.agent --limit 3 --fresh     # smoke test, 3 questions
 

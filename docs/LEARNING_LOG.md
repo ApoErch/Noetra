@@ -209,3 +209,47 @@ four remaining "misses" turned out to be correct answers at locations the hand-w
 key didn't list, a reminder that one-location keys make every score a lower bound.
 
 <!-- Add new entries above this line, most recent last -->
+
+---
+
+## Milestone 8 — The call graph as an agent tool
+
+**Built:** A second Tree-sitter pass (`indexer/calls.py`) that descends *into* function
+bodies — where the symbol-table walk deliberately stops — and records every call site. Callee
+names resolve against the symbol table in confidence tiers (same file 0.9, one imported file
+0.85, unique repo-wide 0.7) into a new `reference_edge` table, and one agent tool,
+`find_references(symbol, direction)`, walks it in either direction and returns chunk-aligned,
+citable locations. Measured with the tool on vs. off on a new question kind: coverage of the
+correct answer set went 0.63 → 0.84 while tool calls fell 28% and tokens 30%.
+
+**Core concept(s):** (1) *Precision over recall in an approximate graph* — a wrong edge sends
+the agent to unrelated code and it answers from there, while a missing edge only leaves it
+searching; so an ambiguous name resolves to nothing rather than to a low-confidence row per
+candidate. (2) *Reachability is not relevance* — the graph answers "what is connected to this
+location", which is a property of the location, not of the question, so it is a tool the agent
+chooses and never a leg voted into the ranked results. (3) *Build the measurement before the
+feature* — the existing benchmark was saturated and contained no question the graph could
+answer, so it would have reported nothing either way.
+
+**Recruiter-ready explanation:** Search ranks things, and ranking is the wrong tool when you
+want *all* of something. Our search returns at most two results per file, so "show me every
+place this function is called" was impossible by construction — not badly ranked, absent.
+So during indexing we now record every call in the codebase as a row: this function, at this
+line, calls that one. Answering "what would break if I change this?" becomes a database lookup
+that returns the complete list, instead of the model reading files and hoping it spotted them
+all. In the measurement, one such question went from three tool calls and a wrong answer to
+one tool call and a complete one.
+
+**Tricky part:** The milestone could not be measured as planned. The agent eval was at 0.91
+with about one question of real headroom, and none of its 46 questions asked for a *set* of
+locations — so a tools-on/off comparison would have returned noise. Worse, the metric itself
+was blind: `cited` asked "is any citation correct", which scores "found two of five call
+sites" as a win. Both had to be fixed first — a `graph` question kind whose keys list every
+correct location, and a coverage metric — before a single line of extraction code was worth
+writing. Building the measurement first also caught the opposite error at the end: the
+reference-weighted repo map looked free and obviously good, and the eval said it made things
+worse, so it was reverted. And the call graph immediately exposed an old bug it depended on —
+zod had 3 import edges for 1,411 entities, twice written off as "monorepo aliases", actually
+TypeScript importing the emitted `./util.js` path for a `util.ts` source. One fix took it to
+405, which had been quietly degrading the import tool and the repo map for every TypeScript
+repo since M4.

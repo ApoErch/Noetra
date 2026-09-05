@@ -24,10 +24,15 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
 ## 4. AI Chat  *(primary feature — this is the agentic RAG surface; shipped in milestone 7)*
 - Natural-language questions: "Explain authentication", "Where is Redis used?",
   "How does the app stop two indexing jobs running for the same repo?"
-- **LangGraph agent** with three tools: `code_search` (the fused lexical + semantic
+- **LangGraph agent** with four tools: `code_search` (the fused lexical + semantic
   `search()`), `read_file` (≤200 numbered lines per call), `list_dependencies` (imports /
-  imported by). `get_callees`, `get_callers` (the call graph) join in milestone 8, measured on
-  the agent eval that now exists. See `RETRIEVAL.md`.
+  imported by), and `find_references` (callers / callees over the call graph, milestone 8).
+  See `RETRIEVAL.md`.
+- **`find_references` answers what search structurally cannot.** `code_search` returns at
+  most two hits per file, so "every place this function is used" is out of its reach by
+  construction; the graph tool returns the complete set, and resolves which definition you
+  meant when a name is defined twice. Measured: coverage 0.63 to 0.84 on enumeration
+  questions, with 28% fewer tool calls.
 - **The agent picks its own strategy per query** — that's the actual feature. Measured: an
   identifier question ends after one search + one read (2 calls, ~5 s); a conceptual one
   searches, reads two files, and answers (3–5 calls). An off-topic question ends with zero

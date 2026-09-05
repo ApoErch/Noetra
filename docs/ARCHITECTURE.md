@@ -65,11 +65,13 @@ pgvector keeps embeddings in the same DB — no second datastore in V1.
 - `core/retrieval` — the two fused retrieval legs (lexical + semantic, RRF) and the graph
   tool functions (`RETRIEVAL.md`). Used by both the search endpoint and the agent tools. No
   retrieval logic lives anywhere else.
-- `core/agent` — the hand-rolled LangGraph `StateGraph` (`graph.py`), the three tools
+- `core/agent` — the hand-rolled LangGraph `StateGraph` (`graph.py`), the four tools
   (`tools.py`), the repo map, the citation verifier, and `runner.py` — the one entry point
-  both `api/chat.py` (streaming) and `eval/agent.py` (scoring) call.
+  both `api/chat.py` (streaming) and `eval/agent.py` (scoring) call. `AgentConfig` carries its
+  own tool list, so an ablation narrows it without this module knowing why.
 - `indexer` — Tree-sitter parsing, AST chunking, symbol extraction, import + call graph
-  resolution. Pure logic: no DB, no HTTP, unit-testable in isolation.
+  resolution (`calls.py` is a second walk that descends into function bodies). Pure logic:
+  no DB, no HTTP, unit-testable in isolation.
 
 ## Data flow
 

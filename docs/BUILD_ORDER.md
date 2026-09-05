@@ -44,8 +44,12 @@ after the Gemini free tier blocked the first attempt (`CONCEPTS.md` A20): semant
 `k=10` with a 2× semantic weight (A22) — beating either leg alone · **M7 the agent —
 shipped and measured 2026-09-05**: hand-rolled LangGraph loop, three tools, repo map,
 mechanical citation verifier, SSE chat UI; agent eval 42/46 cited on `gpt-5.4-mini` (≈45/46 after key review)
-(`RETRIEVAL.md`). **Next up: M8 — the call graph as agent tools**, measured on that eval
-with the tools on vs. off.
+(`RETRIEVAL.md`) · **M8 the call graph as agent tools — shipped and measured 2026-09-06**:
+`reference_edge` written by a second Tree-sitter walk, precision-first name resolution, and a
+single `find_references(symbol, direction)` tool. Measured on a new `graph` question kind
+(the old 46 were saturated and could not move — `CONCEPTS.md` A28): coverage **0.63 to 0.84**
+with 28% fewer tool calls and 30% fewer tokens. **Next up: M9 — metrics + dashboard**, the
+last milestone, which finally moves `status` to `READY`.
 
 Per-milestone writeups live in `LEARNING_LOG.md`.
 
@@ -102,24 +106,32 @@ Per-milestone writeups live in `LEARNING_LOG.md`.
      citation verifier stayed, as pure code.
    - Default chat model moved `gpt-4o-mini` → `gpt-5.4-mini` on the eval (cited 0.59 → 0.91 on 46 questions; mostly citation-format compliance).
 
-8. **The call graph, as agent tools.** A second Tree-sitter walk that *does* descend into
-   function bodies (the symbol-table walk deliberately stops there) extracts call sites;
-   callee names resolve against the symbol table into `reference_edge`, each edge carrying a
-   **confidence** from its resolution tier (same file → imported file → unique repo-wide →
-   ambiguous). Exposed as `get_callees(entity)` and `get_callers(entity)` — one hop per
-   call; the agent hops again if it wants to. **Never a fused leg** — `RETRIEVAL.md` has the
-   research and the reasoning.
-   **Measured two ways:** an edge-quality eval (hand-labelled call sites at the pinned
-   `noetra` SHA → precision/recall of resolved edges), and the M7 agent eval run with the
-   graph tools on vs. off — the LocAgent-style ablation, which is the only place the graph's
-   value actually shows up.
+8. ~~**The call graph, as agent tools.**~~ **Done — measured 2026-09-06.** A second
+   Tree-sitter walk (`indexer/calls.py`) that *does* descend into function bodies (the
+   symbol-table walk deliberately stops there) extracts call sites; callee names resolve
+   against the symbol table into `reference_edge` with a **confidence** per tier (same file
+   0.9 → imported file 0.85 → unique repo-wide 0.7). Exposed as **one** tool,
+   `find_references(symbol, direction)`, not two (`CONCEPTS.md` B25). **Never a fused leg** —
+   `RETRIEVAL.md` has the research and the reasoning.
+   - **What changed from the plan.** The ambiguous 0.3 tier was **dropped entirely** rather
+     than written and filtered: a wrong edge misleads the agent, a missing one only leaves it
+     searching (`CONCEPTS.md` B24). And the milestone could not be measured as specified —
+     the M7 eval was saturated — so a `graph` question kind and a coverage metric were built
+     **before** the feature (A28, A29).
+   - **Measured two ways:** edge quality by hand against the pinned SHAs (5/5, 7/7 and 4/4 on
+     the checked symbols; 19/19 correct on `requests`' duplicated `request` name), and the
+     agent eval with the tool on vs. off — `ccov` **0.63 to 0.84**, calls -28%, tokens -30%.
+   - **Found on the way:** TypeScript `NodeNext` imports name the emitted `.js` path, which
+     the import resolver never stripped — zod had **3 import edges for 1,411 entities**, twice
+     misdiagnosed as monorepo aliases. Fixed: 3 to 405 (`CONCEPTS.md` A30).
+   - **Rejected on measurement:** reference-weighted repo-map PageRank (A31).
 
 9. **Basic metrics + dashboard.** `metrics` pipeline stage; status finally reaches `READY`.
 
 ## Two naming traps
 
 **"Structural" is overloaded.** The thing **cut** in M5 was trigram symbol-*name* lookup
-over `code_entity`. The thing being **built** in M8 is graph *traversal* over call and import
+over `code_entity`. The thing **built** in M8 is graph *traversal* over call and import
 edges — different data, different input (a location, not a query), never built at any layer.
 The M5 cut decision doesn't apply to it. See `RETRIEVAL.md`'s decision record.
 

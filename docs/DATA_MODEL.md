@@ -77,16 +77,27 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/models.py`. Everything scope
 | to_file_id | uuid (fk) | |
 | kind | enum | `import` |
 
-### reference_edge  *(call graph — powers the `get_callees`/`get_callers` agent tools; M8, not yet built)*
+### reference_edge  *(call graph — powers the `find_references` agent tool; M8, shipped 2026-09-06)*
 
 Distinct from `dependency_edge`: that one is **file → file** ("does `a.py` import `b.py`"),
 this one is **entity → entity** ("does `handler()` call `decrypt_token()`"). Resolution is
-**name-based** against the symbol table — no type inference — in tiers: same file, then a
-file this one imports, then a unique repo-wide name, then every candidate when the name is
-genuinely ambiguous. Each tier stamps a `confidence` so tools can filter the ambiguous tail.
-That's the standard "poor man's call graph"; it's approximate on purpose, because it only
-has to orient an agent that then reads the real file. Never fused into `search()` — see
-`RETRIEVAL.md`.
+**name-based** against the symbol table — no type inference (`CONCEPTS.md` B26) — in tiers:
+same file, then a file this one imports, then a unique repo-wide name. That's the standard
+"poor man's call graph"; it's approximate on purpose, because it only has to orient an agent
+that then reads the real file. Never fused into `search()` — see `RETRIEVAL.md`.
+
+**There is no ambiguous tier.** The original spec wrote one row per candidate at confidence
+0.3 while every tool filtered at `≥ 0.5` — rows written, indexed, and never read. More to the
+point, the error is asymmetric: a wrong edge sends the agent to unrelated code and it answers
+from there, while a missing edge only leaves it searching, which it is already good at. So a
+tier matching more than one candidate resolves to **nothing**, and does not fall through to a
+weaker tier. `CONCEPTS.md` B24 has the reasoning and the measurement (on `requests`, where
+`request` is defined twice, all 19 edges resolved to the correct definition).
+
+Written by `indexer/calls.py` during the `graphing` stage — a second Tree-sitter walk that
+descends *into* function bodies, which the symbol-table walk in `indexer/parser.py`
+deliberately does not. A call site with no enclosing entity (a module-level
+`const x = f()`) is dropped, since `from_entity_id` is not nullable.
 
 | field | type | notes |
 |-------|------|-------|
@@ -95,7 +106,7 @@ has to orient an agent that then reads the real file. Never fused into `search()
 | from_entity_id | uuid (fk → code_entity) | the caller |
 | to_entity_id | uuid (fk → code_entity) | the callee |
 | line | int | the call site, for citations |
-| confidence | float | resolution tier: 0.9 same file · 0.85 imported file · 0.7 unique repo-wide · 0.3 ambiguous (one row per candidate). Tools default to `≥ 0.5`. |
+| confidence | float | resolution tier: 0.9 same file · 0.85 imported file · 0.7 unique repo-wide. Ambiguous names write no row at all. Tools filter at `≥ 0.5`, which excludes nothing today — it is the contract that lets a weaker tier be added later without every caller silently inheriting its guesses. |
 
 ### metric  *(basic only in V1; jsonb so new metrics need no migration)*
 | field | type | notes |
@@ -160,7 +171,7 @@ staging is what the build order in `CLAUDE.md` rests on.
 | `code_entity(repository_id, name)` | symbol lookup (chunking, call resolution, M7 repo map) | **M4** |
 | `file(repository_id, content_hash)` | incremental re-index | **M4** |
 | GIN on `chunk.content_tsv` | lexical retrieval over chunks (what `search()` actually uses) | **M5** |
-| `reference_edge(repository_id, to_entity_id)` | `get_callers` — the reverse direction, which is the one that needs the index | **M8** |
+| `reference_edge(repository_id, to_entity_id)` | `find_references(direction="callers")` — the reverse direction, which is the one that needs the index; the forward direction is served by the `from_entity_id` FK index | **M8** ✅ |
 
 **No vector index in V1 (deferred, not forgotten).** `chunk.embedding` has no HNSW/IVFFlat
 index — `semantic_search()` does an exact `<=>` cosine scan. Two reasons: the per-file cap

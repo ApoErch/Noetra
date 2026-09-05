@@ -60,10 +60,11 @@ cloning        git clone into worker storage; persist a `file` row per tracked p
   ▼
 parsing        walk every py/js/ts file; Tree-sitter per language
   │            extract: functions, classes, methods → SYMBOL TABLE
-  │            plus imports, and call sites (M8)
+  │            plus imports; a second walk descends into bodies for call sites
   ▼
 graphing       resolve what parsing extracted → dependency_edge (file → file imports)
-  │            and reference_edge (entity → entity calls, M8)
+  │            and reference_edge (entity → entity calls, name-resolved in
+  │            confidence tiers; an ambiguous name resolves to nothing)
   ▼
 chunking       AST-aware chunks (by function/class, never fixed windows), each with
   │            its context prefix; content_tsv generates itself over embed_text
@@ -114,12 +115,16 @@ row — cascading away every embedding already paid for — over a transient ext
   file tree browser independent of parsing.
 - **parsing** — `indexer`. One extractor per language (py/js/ts) via Tree-sitter.
   Produces plain structured data → `code_entity` rows (the symbol table), import
-  specifiers, and — from M8 — call sites. Note the call-site pass has to descend *into*
-  function bodies, which the symbol-table walk deliberately does not.
-- **graphing** — `indexer`. Resolve imports to target files (`dependency_edge`) and, from
-  M8, callee names to target entities (`reference_edge`). Powers the `list_dependencies` /
-  `get_callees` / `get_callers` agent tools, the M7 repo map, and the V2 architecture view.
-  Pure in-memory resolution over `parsing` output — fast, no I/O beyond the DB write.
+  specifiers, and call sites. The call-site pass is a **separate walk** (`indexer/calls.py`)
+  because it has to descend *into* function bodies, which the symbol-table walk deliberately
+  does not — the two concerns stay in their own modules rather than one walk growing a flag.
+- **graphing** — `indexer`. Resolve imports to target files (`dependency_edge`) and callee
+  names to target entities (`reference_edge`), in that order — the call graph's middle
+  confidence tier is "defined in a file this one imports", so it reuses the import edges just
+  resolved. Powers the `list_dependencies` / `find_references` agent tools, the repo map, and
+  the V2 architecture view. Pure in-memory resolution over `parsing` output — one repo-wide
+  `name -> entity` index is built up front rather than scanned per call, since a call graph
+  runs an order of magnitude more lookups than import resolution.
 - **chunking** — `indexer`. Chunk by AST node; each chunk keeps file, line range, and
   owning entity, and carries a context prefix (path › class › signature). `content_tsv` is
   a Postgres *generated* column over `embed_text`, so the lexical index maintains itself as
