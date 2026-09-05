@@ -43,6 +43,14 @@ class QuestionKind(str, enum.Enum):
     SYMBOL = "symbol"  # names an identifier that exists verbatim; lexical's job too, just a distinct shape of query
     KEYWORD = "keyword"  # words that literally appear in the source; lexical's job
     CONCEPTUAL = "conceptual"  # the user's words appear nowhere in the code; only embeddings can help
+    # Enumeration questions ("every caller of X", "what does Y invoke") whose answer is a
+    # SET of locations, not one. They exist because the M7 agent eval saturated at 0.91 with
+    # ~1 question of real headroom, and none of the other kinds can move: code_search caps at
+    # MAX_CHUNKS_PER_FILE=2 (core/retrieval/types.py), so "list every call site in this file"
+    # is out of reach of the current tools by construction, not by ranking. Scored on
+    # coverage of the whole key in eval/agent.py, not on a single overlap — this is the
+    # bucket M8's graph tools are measured on, tools on vs. off.
+    GRAPH = "graph"
     # A guard-rail bucket, not a retrieval target: the answer genuinely lives in prose
     # (README, docs page), so these fail if the non-source rank penalty in
     # core/retrieval/lexical.py is tuned so hard that documentation stops surfacing at all.
@@ -215,7 +223,17 @@ def run(
 ) -> None:
     """Score the pinned questions for the selected repos (default: noetra) and print the scoreboard."""
     selected = {repo.key for repo in select_repos(repos)}
-    questions = [q for q in load_questions(questions_path) if q.repo in selected]
+    # `kind: graph` questions are deliberately not scored here. They are answered by the
+    # agent's graph tools walking call edges, never by search() — RRF has no graph leg and
+    # is not getting one (docs/RETRIEVAL.md). Letting them in would drag this scoreboard
+    # below its pinned 0.85/0.91 baseline for a reason that has nothing to do with
+    # retrieval quality, and break comparability with every earlier run. They are scored
+    # in eval/agent.py, on coverage.
+    questions = [
+        q
+        for q in load_questions(questions_path)
+        if q.repo in selected and q.kind is not QuestionKind.GRAPH
+    ]
     db = SessionLocal()
     try:
         problems = validate_answers(db, questions)
@@ -232,6 +250,7 @@ def run(
     ran = [leg.value for leg in (legs if legs is not None else ALL_LEGS)]
     print(f"legs: {', '.join(ran)}")
     print(f"repos: {', '.join(sorted(selected))}")
+    print("kinds: symbol, keyword, conceptual, docs (graph questions are scored by eval.agent)")
     report(results)
 
 
