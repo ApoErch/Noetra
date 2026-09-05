@@ -23,7 +23,7 @@
                               ▼                ▼                ▼
                          Tree-sitter       OpenAI API       Git / GitHub API
                          (parse+chunk)   (chat / embed)     (clone / metadata)
-                                        gpt-4o-mini
+                                        gpt-5.4-mini
                                         text-embedding-3-small
 ```
 
@@ -65,8 +65,9 @@ pgvector keeps embeddings in the same DB — no second datastore in V1.
 - `core/retrieval` — the two fused retrieval legs (lexical + semantic, RRF) and the graph
   tool functions (`RETRIEVAL.md`). Used by both the search endpoint and the agent tools. No
   retrieval logic lives anywhere else.
-- `core/agent` — the hand-rolled LangGraph `StateGraph`, the tool definitions, and the
-  repo map.
+- `core/agent` — the hand-rolled LangGraph `StateGraph` (`graph.py`), the three tools
+  (`tools.py`), the repo map, the citation verifier, and `runner.py` — the one entry point
+  both `api/chat.py` (streaming) and `eval/agent.py` (scoring) call.
 - `indexer` — Tree-sitter parsing, AST chunking, symbol extraction, import + call graph
   resolution. Pure logic: no DB, no HTTP, unit-testable in isolation.
 

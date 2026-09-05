@@ -37,7 +37,9 @@ Repository dashboard
      needs chunks to exist; the `tsvector` is a generated column, so there's no separate
      index step once they do.
    - after `embedding` — **fused lexical + semantic search**.
-   - at `ready` — **chat** and metrics.
+   - after `chunking` — **chat** too (the agent's `code_search` degrades to lexical-only
+     until embeddings exist — same `search()`).
+   - at `ready` — metrics.
 
    This staging is the point of the pipeline order below. On a large repo the embedding
    stage dominates wall-clock time; gating everything behind it would mean staring at a

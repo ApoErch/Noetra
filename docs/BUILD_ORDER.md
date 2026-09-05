@@ -41,8 +41,11 @@ stops being a *gate* and goes back to being a *scoreboard*.
 search + AST chunking · **M6 provider layer + semantic leg — measured 2026-09-04** on OpenAI
 after the Gemini free tier blocked the first attempt (`CONCEPTS.md` A20): semantic-only
 `recall@5` 0.85 vs the 0.72 lexical baseline; fused 0.85 / 0.91 after re-tuning RRF to
-`k=10` with a 2× semantic weight (A22) — beating either leg alone. **Next up: M7 — the
-agent.** (The call graph moved behind it on 2026-09-04 — `CONCEPTS.md` B20.)
+`k=10` with a 2× semantic weight (A22) — beating either leg alone · **M7 the agent —
+shipped and measured 2026-09-05**: hand-rolled LangGraph loop, three tools, repo map,
+mechanical citation verifier, SSE chat UI; agent eval 42/46 cited on `gpt-5.4-mini` (≈45/46 after key review)
+(`RETRIEVAL.md`). **Next up: M8 — the call graph as agent tools**, measured on that eval
+with the tools on vs. off.
 
 Per-milestone writeups live in `LEARNING_LOG.md`.
 
@@ -84,25 +87,20 @@ Per-milestone writeups live in `LEARNING_LOG.md`.
    overall 0.72 → 0.85. Fusion needed two measured fixes to beat semantic alone (`k=10`,
    semantic weighted 2×) — see `RETRIEVAL.md`.
 
-7. **The agent.** Three tools, all of which exist or are free today: `code_search` (the
-   fused `search()`), `read_file`, `list_dependencies` (over the `dependency_edge` table M4
-   built). Repo map (PageRank-ranked, AI-free table of contents from `code_entity` +
-   `dependency_edge`, in the stable prompt prefix so the first move is informed rather than a
-   blind keyword guess) + a **hand-rolled LangGraph `StateGraph`** — we write the state,
-   `call_model`, `ToolNode`, and the `should_continue` edge; LangGraph only runs the graph.
-   Streamed over SSE with tool-call status, citations built from tool-result metadata. Chat
-   UI reuses the existing citation → Monaco overlay path. Extends `eval/run.py` to score
-   agent-mediated retrieval (checkpointed per question, so an interrupted run resumes) —
-   **that agent eval is the baseline M8 is measured against.**
-   - **Two hallucination-mitigation steps, both cheap.** A CRAG-style retrieval grade runs
-     right after each tool call, before that result reaches the model: junk/irrelevant tool
-     output triggers a re-search instead of being handed to `call_model` to generate from. A
-     citation-verification node runs right before `END`: every `file:line` in the draft
-     answer is checked against the tool-result metadata actually collected this turn, and any
-     citation that isn't backed by a real retrieval hit is dropped. Neither costs an extra
-     model call — see `RETRIEVAL.md`'s "Hallucination mitigation" section for why an
-     LLM-judge faithfulness check (a real SOTA option) is deliberately deferred until the eval
-     shows these two aren't enough.
+7. ~~**The agent.**~~ **Done — measured 2026-09-05.** `core/agent/`: tools `code_search`,
+   `read_file` (≤200 lines/call), `list_dependencies` (imports / imported_by); a
+   PageRank-ranked repo map in the stable prompt prefix; a hand-rolled `StateGraph`
+   (`call_model → tools → … → verify_citations`) with a tool budget and a no-progress guard;
+   SSE chat endpoint + `chat_conversation`/`chat_message` tables (own tables, not a
+   checkpointer — `CONCEPTS.md` B22); chat UI replacing the search panel, citations clicking
+   through to the Monaco overlay. `eval/agent.py` scores retrieved / cited / cost per
+   question — **the baseline M8 is measured against**: gpt-5.4-mini 42/46 cited (3 of the 4 misses are narrow answer keys — `CONCEPTS.md` A26),
+   3.3 tool calls/question, 0 stripped citations across 138 answers.
+   - **What changed from the plan:** the router node and the CRAG-style grader node were
+     dropped before building (`RETRIEVAL.md`, `CONCEPTS.md` B21) — in a tool-calling loop the
+     model is already the grader, and the off-topic branch is a zero-tool answer. The
+     citation verifier stayed, as pure code.
+   - Default chat model moved `gpt-4o-mini` → `gpt-5.4-mini` on the eval (cited 0.59 → 0.91 on 46 questions; mostly citation-format compliance).
 
 8. **The call graph, as agent tools.** A second Tree-sitter walk that *does* descend into
    function bodies (the symbol-table walk deliberately stops there) extracts call sites;

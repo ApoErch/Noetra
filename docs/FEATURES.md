@@ -21,55 +21,46 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
 - Entry point independent of search/chat citations — this is direct browsing, not just
   jump-to-citation.
 
-## 4. AI Chat  *(primary feature — this is the agentic RAG surface)*
+## 4. AI Chat  *(primary feature — this is the agentic RAG surface; shipped in milestone 7)*
 - Natural-language questions: "Explain authentication", "Where is Redis used?",
-  "How do payments work?"
-- **LangGraph agent** with retrieval tools: `code_search`, `read_file`, `list_dependencies`
-  in milestone 7; `get_callees`, `get_callers` (the call graph) join in milestone 8, once the
-  agent eval exists to measure them. Iterates like a developer exploring the repo. See
-  `RETRIEVAL.md`.
-- **The agent picks its own strategy per query** — that's the actual feature, not "chat with
-  a retriever bolted on." An exact-identifier question resolves in one `code_search` and
-  stops. A vague conceptual one searches, follows the top hit's callees, reads a file, and
-  searches again with better terms if the first pass came back thin.
-- Loop is a **hand-rolled `StateGraph`** (state → `call_model` → `should_continue` →
-  `ToolNode` → back), not `create_react_agent`. We need custom nodes for citation collection
-  and repo-map priming anyway.
-- Oriented by an AI-free **repo map** — a PageRank-ranked table of contents (top symbols per
-  file, ranked by import-graph centrality) in the *stable* prompt prefix, so the agent's
-  first search is informed rather than a blind guess. Built in milestone 7 from
-  `code_entity` + `dependency_edge`. See `RETRIEVAL.md`.
-- Streamed answers over SSE, each citing concrete `file:line` locations rendered as links
-  into Monaco — reusing the citation → overlay path search already proved. Citations are
-  built from tool-result metadata, never from what the model says it read.
-- Stream tool-call status alongside tokens ("searching `TokenService`… reading
-  `auth/tokens.py`…"). An agent loop takes seconds; silence during it reads as a hang.
-- Two cheap hallucination guards, no extra model calls: a retrieval grade discards junk tool
-  results before they reach the model, and a citation-verification node strips any
-  `file:line` in the final answer that isn't backed by a real retrieval hit from that turn.
-  See `RETRIEVAL.md`.
-- Build note: ships **directly as the agent** (milestone 7) — there is no single-shot RAG
-  version. Once the retrievers are already exposed as tools, the multi-step loop is a small
-  amount of code on top of them, and a single-shot version would be deleted a week later.
-  The earlier plan's "chat v1 then chat v2" split was extra work, not less.
-- `find_symbol` is **not** in the tool list — it was structural v1's agent-facing form, and
-  went when structural v1 was cut. `code_search` covers the same ground per the eval.
-- Optionally persists history in `chat_message`.
+  "How does the app stop two indexing jobs running for the same repo?"
+- **LangGraph agent** with three tools: `code_search` (the fused lexical + semantic
+  `search()`), `read_file` (≤200 numbered lines per call), `list_dependencies` (imports /
+  imported by). `get_callees`, `get_callers` (the call graph) join in milestone 8, measured on
+  the agent eval that now exists. See `RETRIEVAL.md`.
+- **The agent picks its own strategy per query** — that's the actual feature. Measured: an
+  identifier question ends after one search + one read (2 calls, ~5 s); a conceptual one
+  searches, reads two files, and answers (3–5 calls). An off-topic question ends with zero
+  tool calls — the system prompt declines and redirects; there is no separate router.
+- Loop is a **hand-rolled `StateGraph`** (`call_model → tools → … → verify_citations`), not
+  `create_react_agent`, with a tool budget (`AGENT_TOOL_BUDGET`) and a no-progress guard.
+- Oriented by an AI-free **repo map** — PageRank-ranked top symbols per file in the *stable*
+  prompt prefix. Measured to keep the model grounded: without it, gpt-5.4-mini answered one
+  question from memory with no tool calls at all.
+- Streamed over SSE (`POST /repos/{id}/conversations/{cid}/messages`): tool-call status
+  events (`searched "…" — 10 hits`, `read tasks.py:41-88`) then answer tokens, then the
+  verified citations. The UI shows the steps live and keeps them as a collapsible block.
+- Citations are written inline as `[path:start-end]` and rendered as chips → the same
+  Monaco overlay path search proved. Every one is **verified in code** against the ranges
+  the tools actually returned that turn; unbacked ones are demoted to plain text. Zero
+  stripped across 64 eval answers so far.
+- **Conversations persist**: `chat_conversation` + `chat_message` (own tables, not a
+  LangGraph checkpointer — `CONCEPTS.md` B22). Each turn replays only the last 12
+  user/assistant messages, never old tool results. New chat / switch / delete in the panel.
+- Chat unlocks once `chunking` has finished (the agent works lexical-only until embeddings
+  exist); it never waits for `ready`.
+- Planned-then-dropped: a CRAG-style retrieval-grade node and an on/off-topic router node —
+  see `RETRIEVAL.md` for the evidence and `CONCEPTS.md` B21 for the revisit triggers.
 
-## 5. Hybrid search
-- Replaces manual Ctrl+Shift+F. "where do we send emails?", "where is `createToken` defined?"
-- Hybrid retrieval: lexical + semantic, RRF-fused — two legs, full stop. The call graph is
-  an agent tool, not a search leg (`RETRIEVAL.md`). No reranker in V1; see `RETRIEVAL.md`.
-- Ranked results with `file:line` + one-line context. Click → open in Monaco at that line.
-- Build note: shipped in milestone 5 with **lexical + structural v1**, then structural v1 was
-  removed after an eval-driven ablation showed it moving recall@5 by only +0.04 — see
-  `RETRIEVAL.md`'s decision record. Milestone 6 added the semantic leg, fused via weighted
-  RRF (recall@5 0.72 → 0.85 — `RETRIEVAL.md`). Nothing else joins the fusion.
-  **The endpoint contract and the UI don't change through any of that** — only what's behind
-  `core/retrieval` does. Shipping search early is what proved the citation path end-to-end
-  and gave the eval harness something to measure.
-- Lexical results are available once `status` passes `chunking`; the fused semantic leg needs
-  `embedding` to finish. The file tree unlocks earlier, right after `cloning`.
+## 5. Hybrid search  *(now internal — the agent's `code_search` tool)*
+- Lexical + semantic, RRF-fused — two legs, full stop. The call graph is an agent tool, not a
+  search leg (`RETRIEVAL.md`). No reranker in V1.
+- History: shipped in milestone 5 behind `GET /repos/{id}/search` with a search panel, which
+  proved the citation → Monaco path end to end and gave the eval something to measure.
+  Structural v1 was removed after an ablation (+0.04); milestone 6 added the semantic leg
+  (recall@5 0.72 → 0.85). **In milestone 7 the endpoint and panel were removed** — chat
+  replaced them as the user-facing surface, and `eval/run.py` calls `search()` directly. The
+  retrieval module is unchanged; only its caller moved.
 
 ## 6. Repository dashboard  *(basic metrics only)*
 - Header counts: file count, function count, total LOC.

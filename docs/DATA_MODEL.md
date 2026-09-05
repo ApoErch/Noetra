@@ -105,16 +105,30 @@ has to orient an agent that then reads the real file. Never fused into `search()
 | key | text | `file_count\|function_count\|total_loc\|language_breakdown\|largest_files` |
 | value | jsonb | payload |
 
-### chat_message  *(optional in V1)*
+### chat_conversation  *(one chat thread: user × repository — the agent's memory scope)*
 | field | type | notes |
 |-------|------|-------|
 | id | uuid (pk) | |
+| user_id | uuid (fk → user) | ownership-checked on every read |
 | repository_id | uuid (fk) | |
-| user_id | uuid (fk) | |
+| title | text | first question, truncated |
+| created_at / updated_at | timestamptz | list is ordered by `updated_at` |
+
+### chat_message  *(one question or one final answer — never a tool result)*
+| field | type | notes |
+|-------|------|-------|
+| id | uuid (pk) | |
+| conversation_id | uuid (fk → chat_conversation, cascade) | |
 | role | enum | `user\|assistant` |
-| content | text | |
-| citations | jsonb | list of `{file, start_line, end_line}` |
+| content | text | the answer keeps its `[path:a-b]` citations inline |
+| citations | jsonb, nullable | list of `RetrievalHit` dicts — only citations the verifier backed |
+| tool_trace | jsonb, nullable | `[{name, args, summary}]` — for the UI "steps" block, never replayed to the model |
 | created_at | timestamptz | |
+
+Only these two roles are stored, and only they are replayed as history (last 12 messages per
+turn). Tool results live in the graph state for one turn and are gone — that is what keeps
+the prompt small and cacheable across a long conversation (`RETRIEVAL.md`, Memory). A
+LangGraph checkpointer was considered and rejected for V1 (`CONCEPTS.md` B22).
 
 ## Relationships
 
@@ -127,7 +141,7 @@ user 1───* repository 1───* file 1───* code_entity *───*
                        │           │              its chunk, so citations stay aligned)
                        │           *───* dependency_edge  (file → file: imports)
                        ├───* metric
-                       └───* chat_message
+                       └───* chat_conversation 1───* chat_message
 ```
 
 `chunk.entity_id` is how a graph tool result (an *entity*) becomes a chunk-aligned

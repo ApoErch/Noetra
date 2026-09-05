@@ -150,61 +150,93 @@ eval shows otherwise.
 - **Stream tool-call status, not just tokens.** *"searching `TokenService`… reading
   `auth/tokens.py`…"* is the difference between alive and hung.
 
-## How the agent uses it (M7)
+## How the agent uses it (M7 — shipped 2026-09-05)
 
-Retrievers are exposed as **tools**: `code_search(query)`, `read_file(path, start?, end?)`,
-`list_dependencies(path)` in M7; `get_callees(entity)`, `get_callers(entity)` join in M8.
+Retrievers are exposed as **tools** the model calls in a loop (`core/agent/tools.py`):
 
-A worked turn — *"How does a private repo get cloned with the user's token?"*:
+| tool | returns | notes |
+|---|---|---|
+| `code_search(query)` | ≤10 lines of `path:start-end · snippet [lexical,semantic]` | the fused `search()`; 10 not 20 — the agent can search again, and every junk line is context it carries |
+| `read_file(path, start?, end?)` | numbered `NN\| code` lines, **≤200 per call** | the read range becomes citable; unknown path → "did you mean" from the repo's paths |
+| `list_dependencies(path, direction)` | paths | `imports` or `imported_by`, over `dependency_edge` |
 
-```
-1. code_search("clone private repo token")       fused lexical+semantic, unchanged
-   → worker/tasks.py:41-88 clone_repository · core/security.py:12-20 decrypt_token
-2. read_file("worker/tasks.py", 41, 88)          the agent wants the body
-   → sees decrypt_token(...), _basic_auth_header(...), subprocess.run(["git","clone",…])
-3. get_callees("clone_repository")               ONE graph call, one hop
-   → [decrypt_token      core/security.py:12-20    call_line 52,
-      _basic_auth_header worker/tasks.py:30-38     call_line 55,
-      release_index_lock core/redis_client.py:22-27 call_line 84]
-4. read_file("worker/tasks.py", 30, 38)          only the helper it needs
-5. answer, citing tasks.py:52, tasks.py:55, security.py:12-20
-```
+`get_callees` / `get_callers` join in M8. Every tool result line carries `path:start-end`
+— **that** is where citations come from; the model is told to cite only ranges it saw.
 
-The graph is called at step 3 — *after* the agent has a location and asks "what's connected
-to this?" — never at step 1, where there is no location yet. It costs one small tool result
-instead of reading three files to discover the same three names. An exact-identifier
-question never reaches step 3. That is the agentic part: the graph is used only when the
-question's shape needs it, which is exactly what a fixed third RRF leg could not do.
-
-The loop is a **hand-rolled `StateGraph`**, not `create_react_agent`:
+Two real turns from the eval:
 
 ```
-START ──> call_model ──> should_continue? ──> tools ──┐
-                              │                       │
-                              └──> END       <────────┘
+decrypt_token
+  1. code_search("decrypt_token")            → 10 hits, top: backend/core/security.py:17-24
+  2. read_file("backend/core/security.py", 17, 24)
+  3. answer, citing [backend/core/security.py:22-24]        2 calls · 5k tokens · 5 s
+
+How does the app stop two indexing jobs running for the same repository at once?
+  1. code_search("prevent duplicate indexing jobs same repository")
+  2. read_file("backend/core/redis_client.py", 1, 17)
+  3. read_file("backend/api/repos.py", 49, 88)
+  4. answer, citing redis_client.py:10-12, repos.py:60-70    3 calls · 9k tokens · 5 s
 ```
 
-We define the state (messages + accumulated citations), `call_model` (bind tools, invoke the
-chat model from `core/ai/chat.py`), the `ToolNode`, and `should_continue`. LangGraph is only
-the executor. There is no single-shot RAG version — once retrievers are tools, the loop is a
-handful of lines on top.
+An identifier question ends after one search. An off-topic question ("write me a poem")
+ends with zero tool calls, because the system prompt says to decline and redirect — that is
+the whole "router". The graph tool (M8) will be called only once the agent *has* a location
+and asks what is connected to it, never at step 1.
 
-**Repo map.** The agent's weak moment is the *first* tool call, guessing a search term with no
-sense of the codebase. Fix: a names-only table of contents (each file with its top-level
-symbols) in the stable prompt prefix, ranked by **PageRank over the import graph** so central
-files survive trimming. Built from `code_entity` + `dependency_edge`, no AI calls — aider's
-idea. Raw centrality over-ranks generic utilities; acceptable, the map only orients.
+The loop is a **hand-rolled `StateGraph`** (`core/agent/graph.py`), not `create_react_agent`:
 
-**Citations come from tool-result metadata, never from the model.** The retriever already
-knows file and line range; asking the model where it found something invites drift.
+```
+START ──> call_model ──(tool calls?)──> tools ──> call_model …
+              │
+              └──(answer)──> verify_citations ──> END
+```
 
-**Hallucination guards, both without an extra model call.** (1) *Retrieval grading*
-(CRAG-style) right after each tool call: junk or empty results trigger a re-search instead of
-reaching `call_model`. (2) *Citation verification* before `END`: every `file:line` in the
-draft is checked against the hits collected this turn; unbacked citations are dropped. This is
-structural — it catches *fabricated* citations, not a real citation that doesn't support its
-sentence. LLM-judge / NLI faithfulness scoring is deferred until the eval shows these two
-aren't enough.
+- `call_model` binds the tools to the chat model from `core/ai/chat.py`. System prompt →
+  tool schemas → repo map come first and are byte-identical per repo, so OpenAI's automatic
+  prompt cache hits every turn. Once the **tool budget** (`AGENT_TOOL_BUDGET`, default 8) is
+  spent, tools stay declared but `tool_choice="none"` forces an answer.
+- `tools` is our own node, not the prebuilt `ToolNode`: each result is appended as a
+  `ToolMessage`, its ranges go into `state.hits`, a UI trace line is recorded, and the
+  **no-progress guard** blocks an identical repeat call with a hint instead of running it.
+  Parallel tool calls in one model message run together.
+- `verify_citations` (`core/agent/citations.py`): every `[path:a-b]` in the answer must name
+  a path retrieved this turn with an overlapping range; anything else is demoted to plain
+  text. Zero model calls. Across 64 eval answers it stripped **nothing** — the model never
+  fabricated a location — but it is what makes that claim checkable.
+
+`END` ends a *turn*, not the conversation: the next message re-invokes the graph with the
+stored history prepended (see Memory).
+
+**Repo map** (`core/agent/repo_map.py`). Names-only table of contents — each parsed file with
+its top-level classes/functions — ordered by **PageRank over the import graph** (hand-rolled
+power iteration, ~15 lines) and cut at `AGENT_REPO_MAP_TOKENS` (1,500). Cached per repo until
+re-index. Measured: on gpt-5.4-mini it made no difference to recall, but *without* it the
+model answered one keyword question from memory with **zero tool calls** and no citation.
+The map's job turned out to be keeping the model in "look it up" mode, not just orienting
+the first search.
+
+**What was planned and dropped.** The M7 plan had a *router node* (on/off-topic classifier
+before the loop) and a *CRAG-style grader node* after each tool call. Both were cut before
+building, on evidence: in a tool-calling loop the model already sees each result and decides
+whether to search again, so a grader is a second opinion on a decision it makes anyway; and
+the off-topic branch ends in the same model call with zero tools. A 2026 repo-QA study
+(arXiv 2608.01507, 4 models × 15 repos) found a plain search+read loop beat an
+orchestrator/sub-agent design 65 % → 46 % at half the cost, and that extra tool calls
+correlated *negatively* with correctness. The mechanical guards (empty-result steering,
+no-progress, budget, citation verifier) cover what the nodes would have. Revisit triggers
+are recorded in `CONCEPTS.md` B21.
+
+**Memory.** Our own `chat_conversation` / `chat_message` tables, not a LangGraph
+checkpointer. Each turn replays only the last 12 *user/assistant* messages — never old tool
+results. A checkpointer would replay every tool output ever produced (turn 3 carries turns
+1–2's file reads: ~12k tokens vs ~3k), the UI would read history out of opaque state blobs,
+and its real strengths (resume mid-step, human-in-the-loop, time travel) aren't needed for a
+few-second chat turn. This is Anthropic's "tool result clearing" done structurally.
+
+**Model.** `gpt-5.4-mini` (default). Measured against `gpt-4.1-mini` on the agent eval
+(46 questions): cited 0.91 vs 0.59, fewer tool calls (3.3 vs 3.8), faster (4 s vs 7 s),
+~1 ¢ vs ~0.5 ¢ per question. Most of 4.1-mini's gap is citation-format compliance rather
+than retrieval — see the caveats under the measurement table.
 
 ## Build order & measurement
 
@@ -218,7 +250,48 @@ vs. off, plus an edge-quality eval of the resolved call graph itself.
 | Lexical | **M5** ✅ | trivial — one migration |
 | ~~Structural v1 (trigram)~~ | M4 → removed after M5 measurement | trivial |
 | Semantic | **M6** ✅ | re-embed the corpus |
+| Agent (M7) ✅ | **M7** — measured 2026-09-05 | prompt/tool edits; re-run `eval.agent` |
 | Graph (agent tools, not fused) | **M8**, after the M7 agent | re-parse + re-resolve; no API cost |
+
+**M7 agent eval (2026-09-05, all 46 questions, `eval.agent --repos all`):** *retrieved* = a
+tool returned a range overlapping the answer key; *cited* = a citation that survived the
+verifier overlaps it — i.e. the user got a clickable link to the right code.
+
+| run | retrieved | cited | calls/q | tokens/q | stripped |
+|---|---|---|---|---|---|
+| **gpt-5.4-mini + repo map (shipped)** | **0.93** | **0.91** | 3.3 | 11.6k | 0 |
+| gpt-5.4-mini, no map | 0.91 | 0.87 | 3.3 | 6.7k | 0 |
+| gpt-4.1-mini + repo map | 0.87 | 0.59 † | 3.8 | 12.9k | 0 |
+
+(The first 16 noetra questions alone: 5.4-mini 16/16 cited, 4.1-mini 13/16.)
+
+**Read the numbers with these four caveats — all measured, none fixed yet:**
+
+1. **The keys are one location each, hand-written, unreviewed** (`CONCEPTS.md` A26). Three
+   of the four 5.4-mini "misses" are correct answers at a location the key doesn't list
+   (zod's `.describe()`/`.meta()` in `classic/schemas.ts` vs. the key's `registries.ts`;
+   `extend()`'s spread-copy vs. two helper functions 200 lines up; a different section of
+   the same `metadata.mdx`). Only "Transfer-Encoding chunked" is a real miss — docs and
+   tests cited instead of `prepare_body`. Realistic score ≈ 45/46. Fix: add those
+   locations as extra `answers` entries and re-score offline (`eval/out/*.jsonl` keeps the
+   answers).
+2. **† 4.1-mini's 0.59 is mostly citation *format*, not retrieval.** It found the code and
+   wrote "lines 90-99" or "[from src/requests/models.py:1144-1171]", which the strict
+   `[path:a-b]` verifier rejects. That is still a product failure (no clickable link) but it
+   overstates the model gap. Option: accept bare `path:a-b` in the verifier and the UI.
+3. **`tokens/q` counts the repo map once per model call**, because the whole prompt is
+   re-sent every call (3.3 tool calls ≈ 4.3 model calls × 1.5k). Those tokens are the
+   byte-identical prefix OpenAI's prompt cache serves at a fraction of the price and with no
+   re-processing — which is why wall-clock was equal with and without the map (4.0 s vs
+   3.8 s). The eval does not yet separate cached from uncached input; until it does, the
+   token column overstates the map's cost. Next step: report cents/question from
+   `usage_metadata.input_token_details`, and try an 800-token map.
+4. **The map's recall gain (+0.04 = 2 questions) is inside the noise at n=46.** It is kept
+   for the behavioural finding in `CONCEPTS.md` A25: without it, the model answered a code
+   question from its own memory with zero tool calls. That is the one failure this product
+   must never show, and the map is the cheapest known fix.
+
+This table is the baseline M8's tools-on/off ablation is measured against.
 
 **M6 measured (2026-09-04, OpenAI `text-embedding-3-small`, all 46 questions, line-level):**
 
@@ -270,9 +343,10 @@ back. `--legs lexical` / `--legs lexical,semantic` ablate a leg in or out.
 **Baselines (all 46, line-level): lexical-only recall@5 0.72 / @20 0.78; semantic-only
 0.85 / 0.93; fused (shipped, semantic 2×) 0.85 / 0.91.** Quote `@5`; at these repo sizes
 `@20` is a soft bar. The eval feeds **raw English** to `search()`,
-which the agent never will — it reformulates first — so the conceptual bucket is realistic for
-the search UI and pessimistic for the agent. M7 extends `run.py` to score agent-mediated
-retrieval alongside it; M8 re-runs that with the graph tools on and off.
+which the agent never will — it reformulates first — so the conceptual bucket is pessimistic
+for the agent. `eval/agent.py` scores the agent itself (retrieved / cited / cost per question,
+checkpointed per question so an interrupted run resumes); M8 re-runs it with the graph tools
+on and off.
 
 ## Build note
 

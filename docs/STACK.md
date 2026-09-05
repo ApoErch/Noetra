@@ -41,7 +41,7 @@ Nothing outside `core/ai` imports a provider SDK. Two switch points, both config
 | | Model | Notes |
 |---|---|---|
 | Embeddings | `text-embedding-3-small` | **1536 dims natively**; vectors arrive unit-normalized; ~8k-token input cap (the API rejects over-long input, so `core/ai` truncates first). ~$0.02 / M tokens. |
-| Chat (default) | `gpt-4o-mini` | Agent loop. |
+| Chat (default) | `gpt-5.4-mini` | Agent loop. Chosen on the M7 agent eval over `gpt-4.1-mini` (cited 0.91 vs 0.59 on 46 questions, fewer tool calls, faster). |
 | Chat (alt.) | `claude-sonnet-5` | Via `get_chat_model("anthropic")`. |
 
 **Why OpenAI, why paid:** the semantic leg was first built on Gemini's free tier, whose

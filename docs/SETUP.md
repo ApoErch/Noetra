@@ -45,7 +45,9 @@ FRONTEND_URL=http://localhost:5173
 EMBEDDING_PROVIDER=openai          # only "openai" is implemented; the switch point for a future provider
 OPENAI_API_KEY=
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small   # 1536 dims — must match chunk.embedding vector(N); changing model = full re-embed
-OPENAI_CHAT_MODEL=gpt-4o-mini
+OPENAI_CHAT_MODEL=gpt-5.4-mini
+AGENT_TOOL_BUDGET=8                # max tool calls per chat question
+AGENT_REPO_MAP_TOKENS=1500         # token budget for the repo map in the agent prompt
 DEFAULT_CHAT_PROVIDER=openai       # openai | anthropic
 ANTHROPIC_API_KEY=                 # only if testing the chat agent against Anthropic
 ANTHROPIC_CHAT_MODEL=claude-sonnet-5
@@ -98,6 +100,15 @@ docker compose exec worker python -m eval.run              # recall@5 / recall@2
 docker compose exec worker python -m eval.run --legs lexical            # ablate a leg out
 docker compose exec worker python -m eval.run --legs lexical,semantic   # explicit, both
 docker compose exec worker python -m eval.run --repos noetra,requests   # more repos
+
+# agent eval (runs the real chat agent; ~1 cent per question; checkpointed per question)
+docker compose exec worker python -m eval.agent                       # baseline → eval/out/agent-baseline.jsonl
+docker compose exec worker python -m eval.agent --tag x --no-repo-map # ablation: no repo map
+docker compose exec worker python -m eval.agent --tag y --model gpt-4.1-mini   # model A/B
+docker compose exec worker python -m eval.agent --limit 3 --fresh     # smoke test, 3 questions
+
+# unit tests (pure — no DB, no LLM)
+cd backend && uv run pytest -q
 ```
 
 The eval runs in `worker`, not `api` — it needs `git`, the DB, and the `.env` file, and

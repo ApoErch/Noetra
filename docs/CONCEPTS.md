@@ -320,6 +320,72 @@ tools on vs. off, plus an edge-quality eval of the resolved graph itself.
 
 ---
 
+### A24. `read_file` crashed on every file ending in a newline — and the agent burned its whole budget on it
+
+**Problem:** the first smoke run of the agent scored 3/3 cited but took 8 tool calls per
+question. The trace showed `read_file` failing six times in a row with `list index out of
+range`; the model kept retrying with different line ranges, then answered from the search
+snippets alone. The line count was computed as `content.count("\n") + 1`, which is one more
+than `splitlines()` returns for a file that ends in a newline — i.e. nearly every file.
+**Why:** the tools node catches every exception and hands the message back to the model as
+text (so a bad argument can't kill a turn). Correct design, but it turned a crash into a
+silent budget drain — the eval's `calls/question` column is what made it visible, not an
+error log.
+**Name:** off-by-one on trailing newline; the "swallowed error becomes wasted tool calls"
+failure mode that makes per-question cost a first-class eval metric.
+**How we solved it:** count lines with `len(splitlines())` everywhere; added a unit test on
+a trailing-newline file. Calls per symbol question went 7.0 → 2.0 and tokens 14k → 5k.
+
+### A25. Without the repo map, the model answered from memory with zero tool calls
+
+**Problem:** the repo-map ablation on gpt-5.4-mini lost one question — not to a retrieval
+miss but to the model answering "git clone basic auth header" from its own knowledge,
+making **no tool calls** and citing nothing. With the map in the prompt it searched, read,
+and cited correctly. On gpt-4.1-mini the map made no measurable difference either way.
+**Why:** a system prompt that only *describes* tools is easy to skip when the model already
+"knows" the answer; a concrete listing of the repo's files and symbols anchors it to *this*
+codebase and makes "look it up" the obvious move.
+**Name:** grounding pressure — the map's value is behavioural, not recall.
+**How we solved it:** kept the map (1,500 tokens/turn). The agent eval now reports tool
+calls per question, so a zero-call answer to a code question is visible as a miss.
+**Honest cost note (46 questions):** the map added +0.04 cited — two questions, inside the
+noise — and the raw token column nearly doubled (6.7k → 11.6k/question) because the prompt
+is re-sent on every model call. Those are cached-prefix tokens (same wall-clock either way),
+but the eval doesn't yet split cached from uncached input, so the real price is unmeasured.
+Open follow-ups: cents/question from `usage_metadata`, and an 800-token map.
+
+### A26. The answer keys are narrower than the truth — three of four "misses" were correct answers
+
+**Problem:** on all 46 questions gpt-5.4-mini scored 42 cited. Reading the four failures
+against the code: zod's "attach descriptive information without altering the schema" was
+answered with `.describe()`/`.meta()` (which clone and register) while the key pointed at
+`registries.ts`; "how is a schema's shape copied" was answered with `extend()`'s spread
+copy while the key listed two helpers 200 lines earlier in the same file; "how do I attach
+metadata" cited lines 81–105 of the same `metadata.mdx` the key pins at 13–35. Only
+"Transfer-Encoding chunked" was a real miss (docs + tests cited instead of `prepare_body`).
+**Why:** the keys were written by one person on 2026-07-26 by reading each repo at its
+pinned SHA and recording *the* location — one per question — and were validated only for
+path existence, never reviewed for completeness. A one-location key makes the score a lower
+bound: any correct answer elsewhere counts as a miss.
+**Name:** answer-key coverage; scores as lower bounds.
+**How we solved it:** not yet fixed (documented 2026-09-05). Fix is to add the verified
+alternative locations as extra `answers` entries — the YAML already allows several — and
+re-score the stored JSONL answers offline, no API cost. Guard against fitting the key to the
+model: only add a location after reading it and confirming it answers the question.
+
+### A27. A single 884,000-character line blew past the model's request limit
+
+**Problem:** on the requests repo one `read_file` call returned `ext/requests-logo.svg` —
+one line, 884k characters ≈ 220k tokens — and OpenAI rejected the request (429, "request
+too large"), killing the whole paid eval run. The 200-line cap didn't help: lines are not a
+safe unit when one line is a minified bundle or an inline SVG.
+**Why:** the cap was written thinking in source-file terms; search surfaced the SVG chunk
+because lexical matching doesn't care what a file is.
+**Name:** cap by bytes, not by lines; make paid runs resumable and per-item fault-tolerant.
+**How we solved it:** `read_file` now also caps at 12,000 characters and search snippets at
+160; the eval records a failed question instead of aborting, and its per-question JSONL
+checkpoint meant the restart re-used all 16 finished answers.
+
 ## B. Design decisions
 
 ### B1. FastAPI over Flask / Django
@@ -489,3 +555,46 @@ agent first (M7) with the tools that already exist, because the graph's value ca
 measured inside the loop — tools on vs. off on the agent eval (M8). What changes the answer:
 the agent eval showing the conceptual bucket still failing on multi-hop questions with the
 tools present — that's the trigger for the sidecar, or for a real reranker.
+
+### B21. Simple loop + mechanical guards, over router and grader nodes
+**Chose:** one `call_model ↔ tools` loop; off-topic handled by a system-prompt rule; empty
+results return a steering message; an identical repeat call is blocked; a hard tool budget
+forces an answer; a regex citation verifier runs before `END`. No extra LLM calls per turn.
+**Alternative:** the original M7 sketch — a router node (on/off-topic classifier) before the
+loop and a CRAG-style grader node after every tool call. **Why:** in a tool-calling loop the
+model already sees each result and decides whether to search again, so a grader re-decides
+what the next `call_model` decides anyway; and both router branches end in the same model
+call. arXiv 2608.01507 (repo-level code QA, 4 models × 15 repos): plain search+read loop
+65 % pass vs. orchestrator/sub-agents 46 %, at half the cost per correct answer, with tool
+calls beyond need correlating negatively with correctness. Cursor, Claude Code, Copilot and
+SWE-grep all run the plain loop. **Revisit triggers:** router — the eval or real use shows
+tool calls on off-topic questions or refusals on on-topic ones; grader — many turns with
+`retrieved` true but `cited` false (the model saw the answer and still re-searched or
+answered from junk); reranker — retrieval `recall@5` stalls while `@20` stays high;
+retrieval sub-agent — main-model context blowing up on large repos. Each is a small graph
+change measurable in a day with the `eval.agent` flags.
+
+### B22. Own `chat_conversation`/`chat_message` tables over a LangGraph checkpointer
+**Chose:** persist only user questions and final assistant answers (with verified citations
+and the tool trace for the UI); rebuild each turn's prompt as system + map + last 12 of those
++ the new question. **Alternative:** `PostgresSaver` keyed by `thread_id`, which snapshots
+the whole graph state after every step. **Why:** the checkpointer replays every previous
+turn's tool outputs — turn 3 carries turns 1–2's file reads (~12k tokens vs ~3k) — which is
+exactly the "tool result clearing" Anthropic recommends against keeping; the UI's
+conversation list and history are ordinary SQL on our rows, ownership-scoped like every
+other read, instead of filtering checkpoint blobs; and the checkpointer's real strengths
+(resume a crashed run mid-step, human-in-the-loop, time travel) aren't needed for a
+few-second chat turn. `END` ends a turn, not the conversation — the next message re-invokes
+the graph with the stored history. **What changes the answer:** a turn that can be
+interrupted and resumed (human approval before a tool runs), which is the moment to add a
+checkpointer without touching the graph code.
+
+### B23. `gpt-5.4-mini` as the default chat model
+**Chose:** `gpt-5.4-mini` ($0.75 / $4.50 per M tokens). **Alternative:** `gpt-4.1-mini`
+(half the price), or the original `gpt-4o-mini`. **Why:** measured on the agent eval,
+46 questions: cited 0.91 vs 0.59 for 4.1-mini, fewer tool calls (3.3 vs 3.8), and
+faster (4 s vs 7 s per question). Per question that is ~1 ¢ vs ~0.5 ¢. Caveat: most of
+4.1-mini's gap is citation *format* — it found the code but wrote "lines 90-99" instead of
+`[path:90-99]`, which the verifier rejects. Still a product failure (no clickable link),
+but a fairer comparison needs the verifier to accept bare `path:a-b` first. Config-only switch
+(`OPENAI_CHAT_MODEL`); `--model` on `eval.agent` re-runs the comparison.
