@@ -1,15 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from api.auth import get_current_user
+from api.deps import get_owned_repository
 from core.celery_app import celery_app
 from core.db import get_db
 from core.github import parse_repo_slug
 from core.models import File, Repository, RepositoryStatus, User
 from core.redis_client import acquire_index_lock
-from core.retrieval import RetrievalHit, search
 
 router = APIRouter(prefix="/api/v1/repos", tags=["repos"])
 
@@ -87,18 +87,6 @@ def create_repository(
     }
 
 
-def _get_owned_repository(repository_id: str, user: User, db: Session) -> Repository:
-    """Look up a `Repository` by id and 404 unless it exists and belongs to `user` — shared ownership check for every repo-scoped endpoint."""
-    repo = (
-        db.query(Repository)
-        .filter(Repository.id == repository_id, Repository.user_id == user.id)
-        .first()
-    )
-    if repo is None:
-        raise HTTPException(status_code=404, detail="Repository not found")
-    return repo
-
-
 @router.post("/{repository_id}/retry")
 def retry_repository(
     repository_id: str,
@@ -106,7 +94,7 @@ def retry_repository(
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
     """Re-enqueue the clone job for a failed repo: clears the error and any partial `File` rows, resets to `queued`."""
-    repo = _get_owned_repository(repository_id, user, db)
+    repo = get_owned_repository(repository_id, user, db)
     if repo.status != RepositoryStatus.FAILED:
         raise HTTPException(status_code=409, detail="Only a failed repository can be retried")
 
@@ -130,7 +118,7 @@ def delete_repository(
     db: Session = Depends(get_db),
 ) -> None:
     """Permanently remove a repo and its files (cascades via the FK) — lets the user clean up failed or unwanted imports."""
-    repo = _get_owned_repository(repository_id, user, db)
+    repo = get_owned_repository(repository_id, user, db)
     db.delete(repo)
     db.commit()
 
@@ -147,7 +135,7 @@ def list_files(
     db: Session = Depends(get_db),
 ) -> list[dict[str, str | bool]]:
     """Return every tracked file's path + binary flag for a repo, for the client to build the file tree (no content — cheap at scale)."""
-    _get_owned_repository(repository_id, user, db)
+    get_owned_repository(repository_id, user, db)
     files = db.query(File).filter(File.repository_id == repository_id).all()
     return [{"id": str(f.id), "path": f.path, "is_binary": f.is_binary} for f in files]
 
@@ -160,20 +148,8 @@ def get_file(
     db: Session = Depends(get_db),
 ) -> dict[str, str | bool | None]:
     """Return a single file's content for lazy-loading into Monaco when clicked in the file tree."""
-    _get_owned_repository(repository_id, user, db)
+    get_owned_repository(repository_id, user, db)
     file = db.query(File).filter(File.id == file_id, File.repository_id == repository_id).first()
     if file is None:
         raise HTTPException(status_code=404, detail="File not found")
     return {"id": str(file.id), "path": file.path, "content": file.content, "is_binary": file.is_binary}
-
-
-@router.get("/{repository_id}/search")
-def search_repository(
-    repository_id: str,
-    q: str = Query(..., min_length=1),
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> list[RetrievalHit]:
-    """Lexical search over an indexed repo, returning ranked file:line hits."""
-    repo = _get_owned_repository(repository_id, user, db)
-    return search(db, repo.id, q, limit=20)
