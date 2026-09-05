@@ -424,3 +424,61 @@ pipeline stage, and `semantic_search()` fused via the already-written (currently
 - `docs/PLAN.md` (old Gemini M6 plan) is still untracked and `.env` still has dead `GEMINI_*` lines — both still pending deletion from the prior session.
 - `eval/run.py:232` enumerates the whole `RetrieverSource` enum as the "ran" list when `--legs` is None; adding a `GRAPH` member in M8 without fixing that would mis-report it as a search leg. Use `_ALL_LEGS` there.
 - Docker services were not touched this session (no code ran).
+
+---
+
+## Session — 2026-09-05 04:25
+
+**Worked on:** Milestone 7 — the LangGraph chat agent — planned, built, measured, documented, and
+committed as 8 commits on `develop` (`f245f6e`…`bb93145`).
+**Done:**
+- Research pass (Anthropic context-engineering / tool-design posts, Cursor semsearch, Cognition
+  SWE-grep, Copilot @workspace, DeepWiki, arXiv 2608.01507 + 2512.12117) → plan diverged from the
+  user's draft: **no router node, no LLM grader node**; mechanical guards instead (`CONCEPTS.md` B21).
+- `backend/core/agent/`: `tools.py` (`code_search` limit 10, `read_file` ≤200 lines and ≤12k chars,
+  `list_dependencies` imports/imported_by; `db`/`repository_id` as `InjectedToolArg`),
+  `citations.py` (regex + interval-overlap verifier), `repo_map.py` (hand-rolled PageRank, tiktoken
+  budget, cached per repo), `prompts.py`, `state.py`, `graph.py` (`call_model → tools →
+  verify_citations`, budget via `tool_choice="none"`, no-progress guard, own tools node),
+  `runner.py` (`run_turn` / `stream_turn` — shared by API and eval).
+- `api/chat.py`: conversations CRUD + `POST …/conversations/{cid}/messages` as SSE (sync generator,
+  fresh `SessionLocal` inside it); `api/deps.py` (`get_owned_repository`); `/search` endpoint gone.
+- `chat_conversations` / `chat_messages` tables, migration `c4d5e6f7a8b9` applied locally.
+- Frontend: `lib/chat.ts` (fetch-based SSE reader), `ChatPanel.tsx`, `MessageBubble.tsx`
+  (react-markdown, `[path:a-b]` → chips → existing Monaco overlay); `SearchPanel` + `lib/search.ts`
+  deleted. `pnpm build` clean.
+- First `backend/tests/` (19 pure tests) + `[tool.pytest.ini_options]`; `eval/agent.py`
+  (retrieved / cited / calls / tokens, JSONL checkpoint per question, `--model --budget
+  --no-repo-map --limit --fresh --repos --kinds`); `eval/run.py` leg-reporting fix (`ALL_LEGS`).
+- Measured (46 questions): gpt-5.4-mini + map **cited 0.91**, no map 0.87, gpt-4.1-mini 0.59
+  (mostly citation *format*); 0 stripped citations across 138 answers. Default model →
+  `gpt-5.4-mini`. Docs realigned (RETRIEVAL, BUILD_ORDER, FEATURES, DATA_MODEL, SETUP, STACK,
+  ARCHITECTURE, WORKFLOW, README); CONCEPTS A24–A27, B21–B23.
+**In progress:** Nothing half-built. The user's manual browser check of the chat UI had not been
+reported back when the session ended (dev server was left running on :5173, API recreated on
+:8000 with gpt-5.4-mini).
+**Key decisions:**
+- Simple loop + mechanical guards over router/grader nodes → in a tool loop the model is already
+  the grader; the repo-QA study showed added nodes hurt (65 % vs 46 %).
+- Own chat tables over a LangGraph checkpointer → never replay old tool results; plain SQL for
+  the UI; `END` ends a turn, not the conversation.
+- gpt-5.4-mini default → 0.91 vs 0.59 cited, fewer calls, faster, ~1 ¢/question.
+- Repo map kept despite only +0.04 → without it the model answered from memory with zero tool
+  calls (A25); its token cost is cached-prefix and not yet measured separately.
+**Next step:** Either close the M7 eval caveats (widen 3 narrow answer keys + re-score offline;
+accept bare `path:a-b` in verifier + UI; cached-token/cents accounting; try an 800-token map) or
+start **M8 — call graph as agent tools** (`reference_edge` + confidence, `get_callees`/`get_callers`),
+measured with `eval.agent` tools on vs off against the table in `RETRIEVAL.md`.
+**Watch out for:**
+- Answer keys are one location each and unreviewed — 3 of 4 gpt-5.4-mini "misses" were correct
+  answers elsewhere (A26). Treat scores as lower bounds; add locations only after reading them.
+- `eval/out/*.jsonl` (gitignored) holds every answer from today's runs — re-scoring `cited` for
+  widened keys needs no API calls; re-verifying with a relaxed regex does (hits aren't stored).
+- `tokens/q` counts the repo map once per model call; wall-clock says it's cached. Don't cut
+  the map on that column alone.
+- Chat gates on "repo has chunks", never on `READY` (nothing sets READY until M9).
+- `docker compose restart` still doesn't re-read `.env` — use `up -d --force-recreate api`.
+- Git Bash heredocs with quoted bodies fail intermittently on this machine — write scripts to
+  a file and run them, or use the Write/Edit tools.
+- Pre-existing, untouched: 3 ruff findings (`api/auth.py`, init migration), mypy celery stubs +
+  `core/github.py:70`.

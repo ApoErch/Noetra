@@ -169,4 +169,43 @@ never as a fused leg (`CONCEPTS.md` B20).
 
 **Tricky part:** Three things. First, the milestone was built once on Google's free tier and could not be measured there: two separate quotas (per-minute *and* per-day) looked identical in the error, and the search code silently fell back to keyword-only when embedding failed — so a "preliminary" number was really measuring a broken run. Moving to a paid provider, deleting the pacing/batching/retry code outright, and turning the silent fallback into a logged warning is what made the measurement possible. Second, truncating input by an estimated chars-per-token ratio failed on real data: a lockfile's hashes tokenize at ~1.5 chars/token where prose is ~4, and the provider rejects over-long input with a hard 400 — the fix is to count tokens with the model's own tokenizer, not estimate. Third, the fusion result: the intuition "two retrievers merged must beat one" was wrong at the paper's default settings, and the fix came from reading the actual score arithmetic (`1/(60+2)` for a #2 in one list loses to `2/(60+40)` for something at #40 in both) rather than from turning knobs.
 
+## Milestone 7 — The chat agent (agentic RAG)
+
+**Built:** A streamed chat that answers questions about a repository with clickable
+`file:line` citations. A hand-rolled LangGraph loop (`core/agent/graph.py`) gives the model
+three tools — fused search, a capped file reader, and an import-graph lookup — and lets it
+decide per question how many to call. A PageRank-ranked repo map sits in the stable prompt
+prefix; a regex citation verifier strips any location the tools never returned; conversations
+persist in our own tables and stream over SSE into a React chat panel that reuses the Monaco
+highlight path. An agent eval (`eval/agent.py`) scores whether the answer *cites* the right
+place: 42/46 on gpt-5.4-mini, zero fabricated citations across 138 answers.
+
+**Core concept(s):** (1) *Agentic RAG as a tool loop* — retrieval is something the model calls
+mid-reasoning, so an identifier question costs one search and a vague one costs four, and the
+loop is the same ~60 lines either way. (2) *Mechanical guards instead of extra LLM nodes* —
+budget, no-progress check, steering error messages and a citation verifier replace the router
+and grader nodes of the textbook design, because in a tool loop the model already sees each
+result and re-decides. (3) *Tool-result clearing as schema* — only questions and final answers
+are stored and replayed, never old tool outputs, so a long conversation's prompt stays small
+and prompt-cacheable.
+
+**Recruiter-ready explanation:** When you ask a question, the model gets a short table of
+contents of the repo and three tools. It searches, reads only the lines it needs, maybe
+follows an import, and writes an answer with citations in a fixed `[path:lines]` format.
+Before the answer is shown, code (not the model) checks every citation against the ranges the
+tools actually returned that turn and drops any that aren't backed — so a citation you can
+click is always real code the agent saw. Each new question re-runs the loop with the previous
+questions and answers in front of it, which is how the chat "remembers" without ever
+re-sending old search results.
+
+**Tricky part:** Knowing what *not* to build. The first draft had an on/off-topic router and a
+relevance grader as separate LLM calls; the research (a 2026 repo-QA study, Anthropic's tool
+guidance, what Cursor/Claude Code/SWE-grep actually ship) said extra nodes add cost and new
+failure modes without measured gain, and the eval confirmed the simple loop answers identifier
+questions in exactly two calls. The second surprise was in the measurement itself: the repo
+map barely moved recall, but without it the model answered a code question from memory with
+zero tool calls — its real job is keeping the model in "look it up" mode. And three of the
+four remaining "misses" turned out to be correct answers at locations the hand-written answer
+key didn't list, a reminder that one-location keys make every score a lower bound.
+
 <!-- Add new entries above this line, most recent last -->
