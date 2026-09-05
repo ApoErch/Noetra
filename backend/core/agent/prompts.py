@@ -38,6 +38,10 @@ written exactly as [path:start-end] (or [path:line]) using the path and line num
 in tool output — for example [backend/api/repos.py:90-99]. Cite each location once, where \
 it is used; explanatory sentences need no citation. Never cite a location you did not see \
 in a tool result.
+- Write [path:start-end] with no spaces inside the brackets.
+- State facts, not process: never say "the search shows" or "the hit is" — the steps you took \
+are displayed separately. Just answer and cite.
+- Do not end with an offer to do more unless the user genuinely has to choose something.
 - If the tools did not find it, say so plainly instead of guessing.
 """
 

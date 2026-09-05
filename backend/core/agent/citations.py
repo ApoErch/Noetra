@@ -12,7 +12,7 @@ from core.retrieval import RetrievalHit
 
 # `[backend/api/repos.py:90-99]` or `[README.md:12]`. Paths may not contain whitespace, brackets
 # or a colon (the colon is the path/line separator).
-CITATION_RE = re.compile(r"\[([^\[\]\s:]+):(\d+)(?:-(\d+))?\]")
+CITATION_RE = re.compile(r"\[\s*([^\[\]\s:]+):(\d+)(?:-(\d+))?\s*\]")
 
 
 @dataclass
@@ -66,6 +66,7 @@ def verify_citations(text: str, hits: list[RetrievalHit]) -> VerifiedAnswer:
                     match_line=None,
                 )
             )
-        return match.group(0)
+        # Normalised (no inner spaces, ascending range) so the UI's regex matches what it links.
+        return f"[{path}:{start}]" if start == end else f"[{path}:{start}-{end}]"
 
     return VerifiedAnswer(text=CITATION_RE.sub(replace, text), citations=citations, stripped=stripped)
