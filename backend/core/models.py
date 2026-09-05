@@ -8,6 +8,7 @@ from sqlalchemy import (
     Boolean,
     Computed,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -218,6 +219,41 @@ class DependencyEdge(Base):
     kind: Mapped[DependencyKind] = mapped_column(
         SAEnum(DependencyKind, name="dependency_kind"), default=DependencyKind.IMPORT
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReferenceEdge(Base):
+    """One resolved call: `from_entity` calls `to_entity`, both within the same repo (see docs/DATA_MODEL.md).
+
+    Distinct from `DependencyEdge`, which is file -> file ("does a.py import b.py"); this is
+    entity -> entity ("does handler() call decrypt_token()"). Powers the agent's
+    `find_references` tool. Never a fused retrieval leg — see docs/RETRIEVAL.md.
+
+    `confidence` records which resolution tier produced the edge (0.9 same file, 0.85 a file
+    this one imports, 0.7 a unique repo-wide name). There is deliberately no ambiguous tier:
+    `indexer.calls.resolve_calls` writes nothing rather than a row per candidate, because a
+    wrong edge sends the agent to unrelated code while a missing one only leaves it
+    searching. Same dedupe-before-insert discipline as DependencyEdge, so no unique
+    constraint.
+    """
+
+    __tablename__ = "reference_edges"
+    # get_callers is the direction that needs an index: "who calls this entity" scans by
+    # target, where get_callees is already covered by the from_entity_id foreign key.
+    __table_args__ = (Index("ix_reference_edges_repository_id_to_entity_id", "repository_id", "to_entity_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), index=True
+    )
+    from_entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("code_entities.id", ondelete="CASCADE"), index=True
+    )
+    to_entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("code_entities.id", ondelete="CASCADE")
+    )
+    line: Mapped[int] = mapped_column(Integer)  # the call site, so a citation can point at it
+    confidence: Mapped[float] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
