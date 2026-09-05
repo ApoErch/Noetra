@@ -11,11 +11,11 @@ from core.retrieval.lexical import lexical_search
 from core.retrieval.semantic import semantic_search
 from core.retrieval.types import MAX_CHUNKS_PER_FILE, RetrievalHit, RetrieverSource
 
-__all__ = ["search", "RetrievalHit", "RetrieverSource"]
+__all__ = ["ALL_LEGS", "search", "RetrievalHit", "RetrieverSource"]
 
 logger = logging.getLogger(__name__)
 
-_ALL_LEGS = (RetrieverSource.LEXICAL, RetrieverSource.SEMANTIC)
+ALL_LEGS = (RetrieverSource.LEXICAL, RetrieverSource.SEMANTIC)
 
 # Fusion vote sizes. Measured on the 46-question eval (docs/CONCEPTS.md A22): with equal
 # votes lexical's junk out-voted semantic's correct pick on conceptual questions (fused 0.78
@@ -40,7 +40,7 @@ def search(
     eval/run.py's --legs flag measure each leg's contribution directly, instead of
     hand-editing this function the way the M5 structural-retrieval ablation had to.
     """
-    legs = legs if legs is not None else _ALL_LEGS
+    legs = legs if legs is not None else ALL_LEGS
 
     # Each leg fetches exactly `limit`, not more. Over-fetching (this used to be limit*2)
     # widens the pool of chunks *both* legs return in their mediocre tail, and under RRF

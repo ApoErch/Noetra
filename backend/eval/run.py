@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from core.db import SessionLocal
 from core.models import File
-from core.retrieval import search
+from core.retrieval import ALL_LEGS, search
 from core.retrieval.types import RetrieverSource
 from eval.repos import EVAL_REPOS_BY_KEY, select_repos
 from eval.seed import eval_id
@@ -229,7 +229,7 @@ def run(
     finally:
         db.close()
 
-    ran = [leg.value for leg in legs] if legs is not None else [leg.value for leg in RetrieverSource]
+    ran = [leg.value for leg in (legs if legs is not None else ALL_LEGS)]
     print(f"legs: {', '.join(ran)}")
     print(f"repos: {', '.join(sorted(selected))}")
     report(results)
