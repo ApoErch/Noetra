@@ -22,10 +22,15 @@ class Settings(BaseSettings):
     embedding_provider: str = "openai"  # only "openai" is implemented today
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"  # 1536 dims = chunk.embedding vector(1536)
-    openai_chat_model: str = "gpt-4o-mini"
+    openai_chat_model: str = "gpt-5.4-mini"
     default_chat_provider: str = "openai"  # "openai" | "anthropic"
     anthropic_api_key: str = ""
     anthropic_chat_model: str = "claude-sonnet-5"
+
+    # Chat agent (core/agent). The budget is the hard stop on tool calls per question; the
+    # repo map is the token allowance for the ranked table of contents in the prompt prefix.
+    agent_tool_budget: int = 8
+    agent_repo_map_tokens: int = 1500
 
     session_secret: str = ""
     token_encryption_key: str = ""

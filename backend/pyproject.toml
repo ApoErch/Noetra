@@ -27,6 +27,7 @@ dependencies = [
     "langchain-core>=0.3",
     "langchain-openai>=0.2",
     "langchain-anthropic>=0.3",
+    "langgraph>=1.0",
 ]
 
 [dependency-groups]
@@ -39,6 +40,10 @@ dev = [
 
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.mypy]
 python_version = "3.11"
