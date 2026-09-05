@@ -23,6 +23,10 @@ code_search with that exact name first.
 the most promising hit.
 - Read only the line range you need. Read a file in pieces rather than all at once.
 - Use list_dependencies to follow imports or find who uses a module.
+- When the question asks for *every* place something is used, or what a change would \
+affect, use find_references — code_search ranks by relevance and returns at most two hits \
+per file, so it cannot list all the call sites in one module. find_references returns the \
+complete set.
 - Stop searching as soon as you can answer. You have a budget of {budget} tool calls per \
 question; when results look wrong, change the terms rather than repeating a call.
 - Messages that are not questions about this repository (small talk, insults, gibberish, \
@@ -46,8 +50,20 @@ are displayed separately. Just answer and cite.
 """
 
 
-def build_system_prompt(repo_name: str, repo_map: str, budget: int) -> str:
+# Kept out of SYSTEM_PROMPT so the M8 ablation can drop the tool AND its guidance together —
+# telling the model to use a tool it has not been given would measure confusion, not the tool.
+GRAPH_TOOL_GUIDANCE = """\
+- When the question asks for *every* place something is used, or what a change would \
+affect, use find_references — code_search ranks by relevance and returns at most two hits \
+per file, so it cannot list all the call sites in one module. find_references returns the \
+complete set."""
+
+
+def build_system_prompt(repo_name: str, repo_map: str, budget: int, graph_tools: bool = True) -> str:
     """Fill the template; called once per turn with the cached repo map."""
     return SYSTEM_PROMPT.format(
-        repo_name=repo_name, repo_map=repo_map or "(no parsed files yet)", budget=budget
+        repo_name=repo_name,
+        repo_map=repo_map or "(no parsed files yet)",
+        budget=budget,
+        graph_tool_guidance=GRAPH_TOOL_GUIDANCE if graph_tools else "",
     )

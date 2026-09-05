@@ -16,7 +16,8 @@ something. Every question's record is appended to a JSONL file as it finishes, s
 interrupted run (API calls cost money) resumes instead of restarting.
 
     python -m eval.agent [--repos noetra|all] [--kinds symbol,keyword] [--tag baseline]
-                         [--model gpt-5.4-mini] [--provider anthropic] [--budget 8] [--no-repo-map] [--limit N]
+                         [--model gpt-5.4-mini] [--provider anthropic] [--budget 8]
+                         [--no-repo-map] [--no-graph-tools] [--limit N]
 """
 
 import argparse
@@ -85,14 +86,23 @@ def _overlaps(hits: list[RetrievalHit], answers: tuple[AnswerLocation, ...]) -> 
     return any(_covers(hit, answer) for hit in hits for answer in answers)
 
 
-def evaluate(question: EvalQuestion, budget: int | None, repo_map: bool, provider: str | None) -> AgentRecord:
+def evaluate(
+    question: EvalQuestion,
+    budget: int | None,
+    repo_map: bool,
+    provider: str | None,
+    graph_tools: bool = True,
+) -> AgentRecord:
     """Run the agent on one question against its seeded repo and score the turn."""
     db = SessionLocal()
     try:
         repo = db.get(Repository, eval_id(question.repo))
         assert repo is not None
         started = time.perf_counter()
-        turn = run_turn(db, repo, question.query, provider=provider, budget=budget, repo_map=repo_map)
+        turn = run_turn(
+            db, repo, question.query, provider=provider, budget=budget,
+            repo_map=repo_map, graph_tools=graph_tools,
+        )
         seconds = time.perf_counter() - started
     finally:
         db.close()
@@ -199,6 +209,11 @@ def main() -> None:
     parser.add_argument("--provider", type=str, default=None, help="openai | anthropic (default: DEFAULT_CHAT_PROVIDER)")
     parser.add_argument("--budget", type=int, default=None, help="tool-call budget per question (default: AGENT_TOOL_BUDGET)")
     parser.add_argument("--no-repo-map", action="store_true", help="ablation: omit the repo map from the prompt")
+    parser.add_argument(
+        "--no-graph-tools",
+        action="store_true",
+        help="ablation: run without find_references (the M8 tools-on/off measurement)",
+    )
     parser.add_argument("--limit", type=int, default=None, help="run only the first N selected questions (smoke test)")
     parser.add_argument("--fresh", action="store_true", help="ignore and overwrite the checkpoint for this tag")
     args = parser.parse_args()
@@ -244,7 +259,10 @@ def main() -> None:
                 records.append(done[key])
                 continue
             try:
-                record = evaluate(question, args.budget, not args.no_repo_map, args.provider)
+                record = evaluate(
+                    question, args.budget, not args.no_repo_map, args.provider,
+                    graph_tools=not args.no_graph_tools,
+                )
             except Exception as exc:  # one provider error must not lose a whole paid run
                 record = AgentRecord(
                     query=question.query, repo=question.repo, kind=question.kind.value,

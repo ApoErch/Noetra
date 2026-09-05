@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from core.agent.graph import AGENT, AgentConfig
 from core.agent.prompts import build_system_prompt
 from core.agent.repo_map import get_repo_map
+from core.agent.tools import GRAPH_TOOLS, TOOLS
 from core.agent.state import AgentState, ToolTrace
 from core.config import get_settings
 from core.models import Repository
@@ -42,17 +43,23 @@ def _config(
     provider: str | None,
     budget: int | None,
     repo_map: bool,
+    graph_tools: bool = True,
 ) -> AgentConfig:
     """Assemble the per-turn config: system prompt (with or without the map) and the budget."""
     settings = get_settings()
     budget = budget if budget is not None else settings.agent_tool_budget
     rendered = get_repo_map(db, repo, settings.agent_repo_map_tokens) if repo_map else ""
+    # The M8 ablation drops the graph tool from both the bound tool list and the prompt, so a
+    # tools-off run is a genuine "agent without the call graph", not one told to use a tool
+    # it cannot call.
+    tools = TOOLS if graph_tools else [t for t in TOOLS if t not in GRAPH_TOOLS]
     return AgentConfig(
         db=db,
         repository_id=repo.id,
-        system_prompt=build_system_prompt(repo.name, rendered, budget),
+        system_prompt=build_system_prompt(repo.name, rendered, budget, graph_tools=graph_tools),
         budget=budget,
         provider=provider,
+        tools=tools,
     )
 
 
@@ -89,9 +96,10 @@ def run_turn(
     provider: str | None = None,
     budget: int | None = None,
     repo_map: bool = True,
+    graph_tools: bool = True,
 ) -> TurnResult:
     """Answer one question and return the whole turn (no streaming)."""
-    config = _config(db, repo, provider=provider, budget=budget, repo_map=repo_map)
+    config = _config(db, repo, provider=provider, budget=budget, repo_map=repo_map, graph_tools=graph_tools)
     final = AGENT.invoke(_initial_state(history or [], question), config.runnable_config())
     return _result(cast(AgentState, final))
 

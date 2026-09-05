@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -38,12 +39,23 @@ def recursion_limit(budget: int) -> int:
 class AgentConfig:
     """Per-turn resources handed to the nodes through LangGraph's `configurable` dict."""
 
-    def __init__(self, db: Session, repository_id: uuid.UUID, system_prompt: str, budget: int, provider: str | None = None):
+    def __init__(
+        self,
+        db: Session,
+        repository_id: uuid.UUID,
+        system_prompt: str,
+        budget: int,
+        provider: str | None = None,
+        tools: list[BaseTool] | None = None,
+    ):
         self.db = db
         self.repository_id = repository_id
         self.system_prompt = system_prompt
         self.budget = budget
         self.provider = provider
+        # Which tools this turn may call. Defaults to all of them; eval/agent.py narrows it
+        # for the M8 tools-on/off ablation without this module needing to know why.
+        self.tools = tools if tools is not None else TOOLS
 
     def runnable_config(self) -> RunnableConfig:
         """Wrap into the config object `graph.invoke`/`graph.stream` accept."""
@@ -73,7 +85,7 @@ def call_model(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     """
     agent = _agent_config(config)
     over_budget = state.get("tool_calls_made", 0) >= agent.budget
-    model = get_chat_model(agent.provider).bind_tools(TOOLS, tool_choice="none" if over_budget else None)
+    model = get_chat_model(agent.provider).bind_tools(agent.tools, tool_choice="none" if over_budget else None)
     messages: list[Any] = [SystemMessage(content=agent.system_prompt), *state["messages"]]
     if over_budget:
         messages.append(SystemMessage(content="Tool budget exhausted. Answer now from what you have, citing only what you saw."))

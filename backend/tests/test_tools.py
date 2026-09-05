@@ -61,7 +61,11 @@ def test_model_facing_schemas_hide_injected_args() -> None:
         "code_search": {"query"},
         "read_file": {"path", "start_line", "end_line"},
         "list_dependencies": {"path", "direction"},
+        "find_references": {"symbol", "direction"},
     }
+    # Every registered tool, not just the ones listed — otherwise a newly added tool is
+    # silently exempt from the one assertion that says injected args stay hidden.
+    assert set(TOOLS_BY_NAME) == set(expected)
     for name, params in expected.items():
         schema = TOOLS_BY_NAME[name].tool_call_schema.model_json_schema()
         assert set(schema["properties"]) == params, name
