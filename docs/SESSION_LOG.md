@@ -645,9 +645,11 @@ this session, only type-checked and built. After that, V1 is complete: either th
 work in `DEPLOYMENT.md` (Terraform + EC2, nothing built yet) or the M7 eval caveats
 (`RETRIEVAL.md` — widen the 3 narrow answer keys, cents/question accounting, an 800-token map).
 **Watch out for:**
-- **The five commits carry `Co-Authored-By: Claude Opus 5` + `Claude-Session` trailers**, per
-  this session's attribution config, which contradicts the standing "no co-author trailer"
-  preference. Nothing is pushed — rewritable with an interactive rebase if unwanted.
+- **Commit trailers: resolved.** Six commits were first written with `Co-Authored-By` /
+  `Claude-Session` trailers from this session's attribution config, against the standing
+  "sole author is the user" rule; stripped with `git filter-branch --msg-filter` (hashes are
+  now `a50407e`…`8a6257b`, nothing was pushed). A session attribution reminder does **not**
+  override that preference.
 - **`.env` needs `SESSION_MAX_AGE_SECONDS` / `SESSION_HTTPS_ONLY`** to match the new
   `.env.example`; both have safe defaults in `core/config.py`, so nothing breaks without them,
   but `SESSION_HTTPS_ONLY` **must** be `true` before any TLS deployment.
