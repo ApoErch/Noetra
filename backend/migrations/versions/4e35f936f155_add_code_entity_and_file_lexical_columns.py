@@ -61,10 +61,13 @@ def upgrade() -> None:
     op.create_index('ix_files_repository_id_content_hash', 'files', ['repository_id', 'content_hash'], unique=False)
     # ### end Alembic commands ###
 
-    # GIN on content_tsv is the actual lexical-search index (docs/DATA_MODEL.md) —
-    # autogenerate doesn't emit this on its own since a plain `Index(...)` in the
-    # model defaults to a btree, and a btree can't index a tsvector's match
-    # operator (`@@`) at all. Same reasoning for the trigram index below.
+    # GIN on content_tsv is the actual lexical-search index (docs/DATA_MODEL.md). A bare
+    # `Index("...", "content_tsv")` in the model would default to a btree, which cannot
+    # index a tsvector's match operator (`@@`) at all — hence raw SQL here. The model does
+    # declare it as of M9, with the access method spelled out
+    # (Index(..., postgresql_using="gin")), which is what autogenerate compares against;
+    # without that declaration every later autogenerate proposed dropping this index.
+    # Same reasoning for the trigram index below (since removed in 7a96b345a5d0).
     op.execute("CREATE INDEX ix_files_content_tsv ON files USING gin (content_tsv)")
     op.execute("CREATE INDEX ix_code_entities_name_trgm ON code_entities USING gin (name gin_trgm_ops)")
 

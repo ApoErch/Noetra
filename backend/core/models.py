@@ -112,6 +112,10 @@ class File(Base):
     __table_args__ = (
         UniqueConstraint("repository_id", "path", name="uq_files_repository_id_path"),
         Index("ix_files_repository_id_content_hash", "repository_id", "content_hash"),
+        # Declared here, not only in the migration that created it: autogenerate compares the
+        # model against the live database, so an index the model doesn't mention reads as one
+        # nobody asked for, and every later autogenerate proposes dropping it.
+        Index("ix_files_content_tsv", "content_tsv", postgresql_using="gin"),
     )
 
 
@@ -157,6 +161,8 @@ class Chunk(Base):
     """
 
     __tablename__ = "chunks"
+    # The lexical-search index. Declared for the same reason as files.content_tsv's above.
+    __table_args__ = (Index("ix_chunks_content_tsv", "content_tsv", postgresql_using="gin"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     repository_id: Mapped[uuid.UUID] = mapped_column(
