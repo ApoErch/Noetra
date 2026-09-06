@@ -15,3 +15,13 @@ def acquire_index_lock(repository_id: str) -> bool:
 def release_index_lock(repository_id: str) -> None:
     """Release the per-repo indexing lock so a future job (e.g. a retry) can acquire it."""
     redis_client.delete(f"lock:index:{repository_id}")
+
+
+def is_index_locked(repository_id: str) -> bool:
+    """Whether an indexing job currently holds this repo's lock — i.e. whether work is actually in flight.
+
+    The only honest way to tell "still embedding" from "stopped part-way through embedding":
+    the status column records the stage a repo reached, never whether anything is still
+    running. The UI uses this to decide whether to offer a Resume button.
+    """
+    return bool(redis_client.exists(f"lock:index:{repository_id}"))

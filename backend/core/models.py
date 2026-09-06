@@ -257,6 +257,29 @@ class ReferenceEdge(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Metric(Base):
+    """One aggregate about an indexed repo, keyed by name with a JSON payload (see docs/DATA_MODEL.md).
+
+    Written once by the `metrics` pipeline stage and read by the dashboard, so the numbers
+    describe the indexed snapshot rather than being recounted on every page load — a repo
+    with tens of thousands of files would otherwise re-aggregate on every poll.
+
+    `value` is JSONB so the five V1 keys and any later one share a single table with no
+    migration: a scalar count is stored as an object, a breakdown as a list.
+    """
+
+    __tablename__ = "metrics"
+    __table_args__ = (UniqueConstraint("repository_id", "key", name="uq_metrics_repository_id_key"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), index=True
+    )
+    key: Mapped[str] = mapped_column(String)
+    value: Mapped[Any] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class ChatConversation(Base):
     """One chat thread between a user and one repository — the unit the chat UI lists and the agent's memory is scoped to."""
 
