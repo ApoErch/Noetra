@@ -8,7 +8,7 @@ import { ChatPanel } from './ChatPanel'
 import { ConversationMenu } from './ConversationMenu'
 import { RepoDashboard } from './RepoDashboard'
 import type { Citation, ViewerTarget } from '../lib/chat'
-import type { Repo } from '../lib/repos'
+import { displayName, type Repo } from '../lib/repos'
 
 type SelectedFile = Extract<TreeNode, { type: 'file' }>
 type Tab = 'chat' | 'dashboard'
@@ -66,7 +66,7 @@ export function RepoExplorer({ repo, onBack }: { repo: Repo; onBack: () => void 
           <span className="font-semibold text-violet-400">Noetra</span>
         </button>
         <span className="text-zinc-700">/</span>
-        <span className="font-medium text-white">{repo.name}</span>
+        <span className="font-medium text-white">{displayName(repo.name)}</span>
 
         <div className="ml-6 flex items-center gap-1">
           <TabButton active={tab === 'dashboard'} onClick={() => setTab('dashboard')}>

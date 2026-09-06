@@ -56,7 +56,7 @@ def _config(
     return AgentConfig(
         db=db,
         repository_id=repo.id,
-        system_prompt=build_system_prompt(repo.name, rendered, budget, graph_tools=graph_tools),
+        system_prompt=build_system_prompt(repo.name.rsplit("/", 1)[-1], rendered, budget, graph_tools=graph_tools),
         budget=budget,
         provider=provider,
         tools=tools,

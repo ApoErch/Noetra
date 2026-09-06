@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '../lib/api'
-import { describeStatus, isOpenable, retryAction, stageProgress, type Repo, type RepoStatus } from '../lib/repos'
+import { describeStatus, displayName, isOpenable, retryAction, stageProgress, type Repo, type RepoStatus } from '../lib/repos'
 
 // Each pipeline stage gets its own hue (in pipeline order) so the badge
 // itself communicates progress, not just "still working" vs. "done".
@@ -118,7 +118,7 @@ export function RepoList({ onOpen }: { onOpen: (repo: Repo) => void }) {
               >
                 <div className="flex items-center justify-between gap-4">
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-white">{repo.name}</p>
+                    <p className="truncate text-sm font-medium text-white">{displayName(repo.name)}</p>
                     <div className="mt-1">
                       <StatusBadge repo={repo} />
                     </div>

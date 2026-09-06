@@ -56,6 +56,11 @@ export function describeStatus(repo: Repo): string {
   return `${label} · step ${step + 1} of ${PIPELINE_STAGES.length}`
 }
 
+/** `name` is stored as "owner/repo" (for uniqueness); the UI only ever shows the repo half. */
+export function displayName(name: string): string {
+  return name.split('/').pop() ?? name
+}
+
 /** How far through the pipeline a repo is, 0–1 — drives the progress bar on the repo card. */
 export function stageProgress(status: RepoStatus): number {
   const step = PIPELINE_STAGES.indexOf(status)
