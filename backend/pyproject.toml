@@ -21,12 +21,13 @@ dependencies = [
     "tree-sitter-javascript>=0.23",
     "tree-sitter-typescript>=0.23",
     "pyyaml>=6.0",
-    "google-genai>=1.0",
+    "openai>=1.0",
+    "tiktoken>=0.7",
     "pgvector>=0.5",
     "langchain-core>=0.3",
-    "langchain-google-genai>=2.0",
     "langchain-openai>=0.2",
     "langchain-anthropic>=0.3",
+    "langgraph>=1.0",
 ]
 
 [dependency-groups]
@@ -39,6 +40,10 @@ dev = [
 
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.mypy]
 python_version = "3.11"

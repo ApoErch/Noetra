@@ -13,6 +13,10 @@ import posixpath
 from dataclasses import dataclass
 
 _JS_MODULE_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx")
+# Extensions a specifier may carry that name the *compiled output* rather than a file on
+# disk. TypeScript's NodeNext resolution requires importing "./util.js" from util.ts, so
+# these get stripped and retried against _JS_MODULE_EXTENSIONS above.
+_JS_OUTPUT_EXTENSIONS = (".js", ".jsx", ".mjs", ".cjs")
 
 
 @dataclass(frozen=True)
@@ -85,13 +89,26 @@ def resolve_js_import(from_path: str, specifier: str, known_paths: set[str]) -> 
 
     if candidate in known_paths:
         return candidate
-    for ext in _JS_MODULE_EXTENSIONS:
-        if f"{candidate}{ext}" in known_paths:
-            return f"{candidate}{ext}"
-    for ext in _JS_MODULE_EXTENSIONS:
-        index_candidate = posixpath.join(candidate, f"index{ext}")
-        if index_candidate in known_paths:
-            return index_candidate
+
+    # TypeScript under `moduleResolution: NodeNext` imports the *emitted* path, so source
+    # that lives in `util.ts` is imported as `"./util.js"`. Taking the specifier literally
+    # means looking for `util.js`, then `util.js.ts`, and resolving nothing — which is why
+    # zod produced 3 import edges for 1,400 entities. Strip a JS output extension and retry
+    # against the source extensions.
+    stems = [candidate]
+    stem, extension = posixpath.splitext(candidate)
+    if extension in _JS_OUTPUT_EXTENSIONS:
+        stems.append(stem)
+
+    for stem_candidate in stems:
+        for ext in _JS_MODULE_EXTENSIONS:
+            if f"{stem_candidate}{ext}" in known_paths:
+                return f"{stem_candidate}{ext}"
+    for stem_candidate in stems:
+        for ext in _JS_MODULE_EXTENSIONS:
+            index_candidate = posixpath.join(stem_candidate, f"index{ext}")
+            if index_candidate in known_paths:
+                return index_candidate
     return None
 
 

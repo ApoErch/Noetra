@@ -343,3 +343,262 @@ pipeline stage, and `semantic_search()` fused via the already-written (currently
   that still looks like it's fusing.
 - Docker services' running state from the prior session was not touched or verified this
   session (no code/containers were run — this was a docs-only session).
+
+---
+
+## Session — 2026-07-28 22:23
+
+**Worked on:** Milestone 6 (Gemini provider layer + semantic retrieval leg), per `docs/PLAN.md`. Code complete and committed; the milestone's own "measured recall delta" deliverable is not — blocked mid-run by the free tier's daily embedding quota.
+**Done:**
+- Pinned the baseline before touching anything: `eval.run` reproduced the documented **0.72/0.78** exactly.
+- `core/config.py`: removed dead `anthropic_api_key`/`embedding_provider`/`embedding_api_key`; added `gemini_*` settings plus (user-requested, ahead of M8) a `default_chat_provider` + per-provider OpenAI/Anthropic keys.
+- New `core/ai/` package: `embeddings.py` (`embed_documents`/`embed_query` — cached `genai.Client` with retry, per-text truncation at a deliberately conservative 2.5 chars/token for code, client-side L2 normalization, token-budget batch packing) and `chat.py` (`get_chat_model(provider)` — a factory returning a ready LangChain chat model for gemini/openai/anthropic, for testing the M8 agent later).
+- Migration `b3f4c9a1d2e6`: `CREATE EXTENSION vector` + `chunks.embedding vector(1536)`, nullable, **no ANN index** (deliberate reversal of the old plan — see Decision 3 in `docs/PLAN.md`). Applied; verified `pgvector 0.8.5` active.
+- `worker/embedding.py`: `embed_repository()` — resumable (`WHERE embedding IS NULL`), paced (sleep between pages), timed. Wired into `clone_repository`; embedding failures are caught and leave `status=EMBEDDING`, never `FAILED` (closes a real data-loss path — `retry_repository` only bulk-deletes `File` rows on `FAILED`).
+- `core/retrieval/semantic.py` + fusion wiring in `__init__.py`: `search()` now fuses lexical + semantic via RRF, gated on data (has-embedded-chunks) not status, degrades gracefully if the semantic call fails, re-applies the per-file cap after fusion.
+- `eval/run.py --legs` and `eval/seed.py`'s embed step (resumable, `--no-embed`, non-fatal per-repo — this last one a real bug found and fixed mid-session: the first `--force` run crashed the whole seed on repo 1 of 3 over one repo's quota failure).
+- Reconciled 9 docs (`DATA_MODEL`, `RETRIEVAL`, `STACK`, `WORKFLOW`, `SETUP`, `BUILD_ORDER`, `ARCHITECTURE`, `FEATURES`, `CONCEPTS`) with what actually got built, including a corrected HNSW section in `CONCEPTS.md` (appended, not rewritten, per that file's existing correction pattern).
+- All of the above committed in 10 small, working increments.
+**In progress:** The actual recall measurement. DB state right now: `noetra` fully embedded (248/248), `requests` partial (600/1040), `zod` untouched (0/3563). A preliminary run showed the `conceptual` bucket moving +0.07 (met the stated bar) but is **not trustworthy** — confirmed live that `search()`'s silent semantic-failure fallback was firing during it, so some unknown fraction of the 46 questions silently lost their semantic leg to quota exhaustion instead of genuinely testing it.
+**Key decisions:**
+- No ANN index in V1 (exact cosine scan) — the per-file cap already forces a full sort, and a plain HNSW/IVFFlat index would silently under-return once `WHERE repository_id =` filters after the fact.
+- Embedding failure is non-fatal by design — a quota blip isn't the repo's fault and shouldn't brick an otherwise fully-searchable repo.
+- Chat provider factory built now even though M8 doesn't exist yet — explicit user request, not built ahead of need for its own sake.
+- Truncation/batching use 2.5 chars/token, not Google's commonly-cited ~4 — that figure is measured on English prose; code is punctuation-dense and tokenizes denser. Verified via Google's own docs rather than taking either side's assertion at face value.
+- Retry attempts bumped 5→9 after a live 429 proved 5 attempts' backoff (~31s) fell short of the server's actual 42s suggested delay.
+**Next step:** Once the free tier's daily embedding quota resets (or billing is enabled): re-run `eval.seed --force` (resumes cleanly from current partial state), then `eval.run --legs lexical` (must still equal 0.72/0.78 exactly) and `--legs lexical,semantic` for the real fused number. Worth adding fallback-failure logging to `search()` first, so that run can report how many questions actually exercised semantic vs. silently fell back. Then Step 8 (routing) and the final verification pass — both deliberately still unstarted, since the plan makes them depend on a real measurement.
+**Watch out for:**
+- **Free tier has two separate quotas** — 100 requests/minute *and* **1,000/day** — discovered by hitting both live. The daily one doesn't recover on any short wait, and Google's `retryDelay` hint is misleadingly short either way; only the error's `quotaId` field tells them apart.
+- **`search()`'s semantic-leg failure is silent by design** (degrades to lexical, no error, no log). Correct for production, but means no eval number from a quota-exhausted window can be trusted — always sanity-check with one direct `embed_query()` call before trusting a semantic/fused eval run.
+- Docker images were rebuilt this session for the new deps (`google-genai`, `pgvector`, `langchain-*`) — a plain restart won't pick up any *future* `pyproject.toml` change; needs `docker compose build api worker` again.
+- `.env` now has a real `GEMINI_API_KEY` filled in by the user directly (never passed through chat) — confirmed still gitignored, not committed.
+
+---
+
+## Session — 2026-09-04 22:41
+
+**Worked on:** Closing Milestone 6 — switched the AI provider from Gemini (free tier) to paid OpenAI, stripped every piece of rate-limit machinery, measured the semantic leg for real, fixed fusion twice, and restructured `CONCEPTS.md`/`RETRIEVAL.md`/`DEPLOYMENT.md`. Six commits on `develop` (`1ae53b2`…`ecff5fd`).
+**Done:**
+- `core/ai/embeddings.py` rewritten for OpenAI `text-embedding-3-small` (1536 native, provider-normalized); `core/ai/chat.py` is `openai` | `anthropic` only; `google-genai`/`langchain-google-genai` removed, `openai` + `tiktoken` added. `EMBEDDING_PROVIDER` + `OPENAI_API_KEY` is the whole switch. Pacing sleep, token-budget batching, retry tuning, `task_type`, client-side L2 normalization — all deleted.
+- One guard kept: input truncation by **real token count** (`tiktoken`, 8,000 tokens) — a chars/token guess failed live on `uv.lock` gap chunks (hashes ≈1.5 chars/token) with a 400 from OpenAI.
+- `search()`'s silent semantic fallback now `logger.warning`s, so an eval run shows whether semantic actually ran.
+- `eval.seed` / `eval.run` gained `--repos` (default `noetra`; `all` or a comma list). All three eval repos re-embedded on OpenAI (noetra 248, requests 1040, zod 3563 chunks; 0 nulls).
+- **M6 measured, all 46 questions, line-level recall@5/@20:** lexical 0.72/0.78 (baseline reproduced exactly) · semantic-only 0.85/0.93 · **fused (shipped) 0.85/0.91**. Conceptual @5 0.36 → 0.57 fused (0.64 semantic-only).
+- Fusion needed two measured fixes: (1) RRF `k` 60→10 and per-leg fetch `limit` not `2×limit` — on 20-deep lists the paper's `k` let "in both legs at rank 40" beat "rank 2 in one leg", so equal-weight fusion scored 0.72, no better than lexical; (2) **weighted RRF, semantic 2×** — with equal votes lexical out-voted semantic on conceptual questions (0.78); at 2× fused matches semantic's @5 and keeps the docs/keyword hits semantic-only loses; at 3×+ the result is identical to semantic-only. `reciprocal_rank_fusion` now takes `weights`.
+- Docs: `CONCEPTS.md` rewritten (1,517 → ~430 lines) as an interview file — Section A problems (A1–A22, incl. the new A20 free-tier story and A22 fusion story), Section B decisions (B1–B19, incl. the stack "why X over Y" entries, B18 paid OpenAI, B19 EC2+Terraform). `RETRIEVAL.md` cut 327 → ~235 lines with the measurement table. `DEPLOYMENT.md` rewritten for one EC2 host running the same Compose stack, provisioned by Terraform (ECS/Fargate deferred with a stated trigger). `STACK`/`ARCHITECTURE`/`SETUP`/`WORKFLOW`/`DATA_MODEL`/`BUILD_ORDER`/`FEATURES`/`README`/`CLAUDE.md` realigned. `/endsession` skill's CONCEPTS step rewritten to the problems/decisions format.
+**In progress:** Nothing — M6 is closed with a measured, reproduced number through the real `search()` path.
+**Key decisions:**
+- Paid OpenAI over free Gemini → the quota machinery was outgrowing the feature and a silent fallback had already produced one untrustworthy number; at ~$0.02/M tokens the cost argument is gone. Deleted rather than parameterised: **no rate-limit code until a 429 actually appears** (user's explicit rule).
+- Embeddings single-provider by design → switching models is a full re-embed regardless, so a live switch has no use case; a new provider is one branch in `core/ai`.
+- `k=10`, fetch `limit`, semantic 2× → all three set by a sweep on the harness, none from the paper; `k<10` and weight >2 buy nothing (weight ≥3 = semantic-only).
+- Eval defaults to noetra for demos; requests/zod kept and runnable via `--repos all`.
+- Single EC2 + Compose via Terraform over ECS Fargate → zero dev/prod drift, one bill; split worker/RDS only when queue depth or latency says so.
+**Next step:** **M7 — the graph leg.** Call-graph extraction (`reference_edge`, name-based resolution), `expand(seeds, max_hops=2)` over `reference_edge ∪ dependency_edge` seeded from the fused top hits (note: that seed list is now the semantic-2× one), fused as a third RRF list with its own weight to measure, plus `get_callers`/`get_callees`/`list_dependencies` tools. Ends with the same in/out ablation. Baseline to beat: fused 0.85/0.91.
+**Watch out for:**
+- **`.env` still has dead `GEMINI_*` lines** (ignored, harmless) — delete at leisure. `docs/PLAN.md` (the old Gemini M6 plan) is still untracked; delete it.
+- A user-imported `ApoErch/Noetra` repo row has 303 chunks with **NULL embeddings** (Gemini-era import, never embedded). Semantic is data-gated so it just runs lexical-only; re-import or run `embed_repository` on it if it matters.
+- **The eval feeds raw English to `search()`**, which favours semantic. The M8 agent will send identifier-shaped queries where lexical and semantic tie (symbol/keyword ≈ 1.0/0.93 either way). Don't read the 2× weight as "lexical barely matters" — it's what keeps docs and keyword@20 at 1.00.
+- The remaining 5 misses are all `conceptual`, 3 of them "right file, wrong lines" — a localization problem, the shape M7's graph expansion (or M8's `read_file`) addresses, not more fusion tuning.
+- `docker compose restart` does **not** re-read `env_file`; after editing `.env` use `docker compose up -d --force-recreate api worker`. Cost this session ~10 minutes.
+- Image rebuild needed after any `pyproject.toml` change (`docker compose build api worker`); done this session for `openai`/`tiktoken`.
+- Pre-existing, untouched: 3 ruff findings (`api/auth.py`, init migration) and mypy `celery` stub warnings; `retry_repository` still only accepts `FAILED`, so a repo parked at `EMBEDDING` has no API resume.
+
+---
+
+## Session — 2026-09-04 23:41
+
+**Worked on:** No code. Research + design review of the graph leg (planned M7), triggered by the user challenging "fuse the graph into RRF as a third leg". Ended in a docs-only realignment, committed as `d7582dc`.
+**Done:**
+- Researched how the field handles graph/structural code retrieval: LARGER, RepoGraph, LocAgent, CodexGraph, Codebase-Memory, GraphRAG-Bench, CodeCompass (papers) and Sourcegraph/Cody, Augment, Greptile, Cursor, Claude Code, Aider (production). **No system fuses graph neighbours into a ranked list.** The graph appears as agent tools, a sidecar attached to a hit (LARGER), or prompt orientation (Aider). RepoGraph: 1-hop best, 2-hop worst. LocAgent: graph tool +4 pts vs keyword search +13. GraphRAG-Bench: graphs lose on simple lookups.
+- Reasoning that settled it: RRF combines *independent estimates of query relevance*; hop distance from a seed is a property of the seed, not the query, and a seeded leg can only amplify the other two. Whether a neighbour matters depends on the question — only an agent can judge that per query.
+- Realigned `BUILD_ORDER`, `RETRIEVAL` (graph section rewritten with the research digest + a worked agent trace), `DATA_MODEL` (`reference_edge.confidence`), `FEATURES`, `WORKFLOW`, `ARCHITECTURE`, `STACK`, `CLAUDE.md`, `LEARNING_LOG`; `CONCEPTS.md` gained **A23** + **B20**, and **B17** is struck through as superseded.
+**In progress:** Nothing. Working tree clean after `d7582dc`.
+**Key decisions:**
+- **The graph is agent tools, never an RRF leg.** Fusion stays lexical + semantic. Tools: `list_dependencies` (free — `dependency_edge` exists), `get_callees`, `get_callers`; one hop per call; edges carry a resolution confidence (0.9 same file → 0.85 imported file → 0.7 unique name → 0.3 ambiguous), tools filter at ≥0.5.
+- **Milestones swapped: M7 = the agent, M8 = the call graph.** The graph's value can only be measured inside the agent loop (tools on vs off), so building it first would ship it unmeasured — the project's own measure-then-buy rule.
+- Honest scope: keyword search already finds a name's call sites, so `get_callers` mostly adds the enclosing caller; `get_callees` is the genuinely new capability.
+- A LARGER-style `related` sidecar on `/search` hits is deferred, not rejected — trigger is the agent eval still failing multi-hop conceptual questions with the tools present.
+**Next step:** Plan and build **M7 — the agent** in its own planning session: tools `code_search` + `read_file` + `list_dependencies`, repo map, hand-rolled LangGraph `StateGraph`, SSE with tool-call status, CRAG-style grade + citation-verification nodes, and the agent-mediated eval in `eval/run.py` (checkpointed per question). That eval is the baseline M8 is measured against.
+**Watch out for:**
+- Old `docs/SESSION_LOG.md` entries (2026-07-26 18:12, 2026-09-04 22:41) still describe the seeded-third-leg design and "M7 = graph leg" — historical, not current. Trust `BUILD_ORDER.md` / `RETRIEVAL.md` / `CONCEPTS.md` B20.
+- `docs/PLAN.md` (old Gemini M6 plan) is still untracked and `.env` still has dead `GEMINI_*` lines — both still pending deletion from the prior session.
+- `eval/run.py:232` enumerates the whole `RetrieverSource` enum as the "ran" list when `--legs` is None; adding a `GRAPH` member in M8 without fixing that would mis-report it as a search leg. Use `_ALL_LEGS` there.
+- Docker services were not touched this session (no code ran).
+
+---
+
+## Session — 2026-09-05 04:25
+
+**Worked on:** Milestone 7 — the LangGraph chat agent — planned, built, measured, documented, and
+committed as 8 commits on `develop` (`f245f6e`…`bb93145`).
+**Done:**
+- Research pass (Anthropic context-engineering / tool-design posts, Cursor semsearch, Cognition
+  SWE-grep, Copilot @workspace, DeepWiki, arXiv 2608.01507 + 2512.12117) → plan diverged from the
+  user's draft: **no router node, no LLM grader node**; mechanical guards instead (`CONCEPTS.md` B21).
+- `backend/core/agent/`: `tools.py` (`code_search` limit 10, `read_file` ≤200 lines and ≤12k chars,
+  `list_dependencies` imports/imported_by; `db`/`repository_id` as `InjectedToolArg`),
+  `citations.py` (regex + interval-overlap verifier), `repo_map.py` (hand-rolled PageRank, tiktoken
+  budget, cached per repo), `prompts.py`, `state.py`, `graph.py` (`call_model → tools →
+  verify_citations`, budget via `tool_choice="none"`, no-progress guard, own tools node),
+  `runner.py` (`run_turn` / `stream_turn` — shared by API and eval).
+- `api/chat.py`: conversations CRUD + `POST …/conversations/{cid}/messages` as SSE (sync generator,
+  fresh `SessionLocal` inside it); `api/deps.py` (`get_owned_repository`); `/search` endpoint gone.
+- `chat_conversations` / `chat_messages` tables, migration `c4d5e6f7a8b9` applied locally.
+- Frontend: `lib/chat.ts` (fetch-based SSE reader), `ChatPanel.tsx`, `MessageBubble.tsx`
+  (react-markdown, `[path:a-b]` → chips → existing Monaco overlay); `SearchPanel` + `lib/search.ts`
+  deleted. `pnpm build` clean.
+- First `backend/tests/` (19 pure tests) + `[tool.pytest.ini_options]`; `eval/agent.py`
+  (retrieved / cited / calls / tokens, JSONL checkpoint per question, `--model --budget
+  --no-repo-map --limit --fresh --repos --kinds`); `eval/run.py` leg-reporting fix (`ALL_LEGS`).
+- Measured (46 questions): gpt-5.4-mini + map **cited 0.91**, no map 0.87, gpt-4.1-mini 0.59
+  (mostly citation *format*); 0 stripped citations across 138 answers. Default model →
+  `gpt-5.4-mini`. Docs realigned (RETRIEVAL, BUILD_ORDER, FEATURES, DATA_MODEL, SETUP, STACK,
+  ARCHITECTURE, WORKFLOW, README); CONCEPTS A24–A27, B21–B23.
+**In progress:** Nothing half-built. The user's manual browser check of the chat UI had not been
+reported back when the session ended (dev server was left running on :5173, API recreated on
+:8000 with gpt-5.4-mini).
+**Key decisions:**
+- Simple loop + mechanical guards over router/grader nodes → in a tool loop the model is already
+  the grader; the repo-QA study showed added nodes hurt (65 % vs 46 %).
+- Own chat tables over a LangGraph checkpointer → never replay old tool results; plain SQL for
+  the UI; `END` ends a turn, not the conversation.
+- gpt-5.4-mini default → 0.91 vs 0.59 cited, fewer calls, faster, ~1 ¢/question.
+- Repo map kept despite only +0.04 → without it the model answered from memory with zero tool
+  calls (A25); its token cost is cached-prefix and not yet measured separately.
+**Next step:** Either close the M7 eval caveats (widen 3 narrow answer keys + re-score offline;
+accept bare `path:a-b` in verifier + UI; cached-token/cents accounting; try an 800-token map) or
+start **M8 — call graph as agent tools** (`reference_edge` + confidence, `get_callees`/`get_callers`),
+measured with `eval.agent` tools on vs off against the table in `RETRIEVAL.md`.
+**Watch out for:**
+- Answer keys are one location each and unreviewed — 3 of 4 gpt-5.4-mini "misses" were correct
+  answers elsewhere (A26). Treat scores as lower bounds; add locations only after reading them.
+- `eval/out/*.jsonl` (gitignored) holds every answer from today's runs — re-scoring `cited` for
+  widened keys needs no API calls; re-verifying with a relaxed regex does (hits aren't stored).
+- `tokens/q` counts the repo map once per model call; wall-clock says it's cached. Don't cut
+  the map on that column alone.
+- Chat gates on "repo has chunks", never on `READY` (nothing sets READY until M9).
+- `docker compose restart` still doesn't re-read `.env` — use `up -d --force-recreate api`.
+- Git Bash heredocs with quoted bodies fail intermittently on this machine — write scripts to
+  a file and run them, or use the Write/Edit tools.
+- Pre-existing, untouched: 3 ruff findings (`api/auth.py`, init migration), mypy celery stubs +
+  `core/github.py:70`.
+
+**Addendum (same session, after the handoff above — commits `f7303e8`…`ca5cec4`):**
+- Manual browser test passed; three chat issues found and fixed (`f7303e8`): blank bubbles on
+  OpenAI refusals (empty `content`, text in `refusal` → fallback line in `verify`); canned
+  off-topic replies (prompt now varies wording, suggests a map-drawn question); inline citation
+  links reloading the app (react-markdown drops unknown URL schemes → `urlTransform` keeps
+  `noetra-cite:`). Chip row now only shows when no citation is inline.
+- **Real bug found:** the user's `ApoErch/Noetra` import stalled at `embedding` — one 200-chunk
+  page exceeded OpenAI's 300k-tokens-per-request cap (400). `core/ai/embeddings.py` now
+  splits a page by token budget (`_MAX_REQUEST_TOKENS = 250_000`); the stalled repo was
+  resumed by hand (157 chunks). Hard size limit, not rate-limit machinery (`be5de44`).
+- LangSmith tracing: env-only (`LANGSMITH_*` in `.env.example`/SETUP.md), runs named
+  `agent_turn` with `repository_id` metadata (`b0c8dea`). Not yet confirmed in the LangSmith UI.
+- Prompt: no process narration, no closing offers, no spaces in citation brackets; verifier
+  tolerates and normalises them (`4fca4f3`, tests `ca5cec4`).
+- Dev server and background tasks stopped at session end; containers left running.
+
+---
+
+## Session — 2026-09-06 02:08
+
+**Worked on:** Milestone 8 — the call graph as an agent tool. Researched, planned, built,
+measured, documented. Six commits on `develop` (`fd038ec`…`a3ad27f`). **M8 is closed.**
+
+**Done:**
+- **Research pass first** (the user asked for it before any plan): LocAgent, RepoGraph, ARISE,
+  Codebase-Memory, LARGER, SWE-QA, plus Sourcegraph/SCIP, GitHub stack-graphs, Serena/LSP,
+  aider. Findings that changed the plan are in `CONCEPTS.md` A28–A31 / B24–B27.
+- **Fixed the measurement before building.** The M7 eval was saturated (0.91, ~1 question of
+  real headroom, no question asking for a *set* of locations), so an on/off ablation would
+  have returned noise. Added `QuestionKind.GRAPH` + 12 enumeration questions (52 answer
+  locations, noetra 6 / requests 4 / zod 2) and **coverage scoring** (`rcov`/`ccov`) to
+  `eval/agent.py`, since a boolean `cited` scores "2 of 5 call sites" as a win. Graph
+  questions are excluded from `eval.run` so the pinned 0.85/0.91 retrieval baseline stays
+  comparable. Baseline with the 3 existing tools: **ccov 0.63**.
+- **`indexer/calls.py`** (pure, 16 tests): a second Tree-sitter walk that descends *into*
+  function bodies (node shapes probed live, not assumed), plus name-based resolution in tiers
+  — same file 0.9, one imported file 0.85, unique repo-wide 0.7. **No ambiguous tier**; an
+  ambiguous name resolves to nothing and does not fall through. `self.foo()` stops at the
+  current file; `x.foo()` is denied the repo-wide tier.
+- **`ReferenceEdge` model + migration `d7e8f9a0b1c2`** (verified with a throwaway
+  autogenerate — it proposed only the two known raw-SQL GIN drops), wired into
+  `worker/indexing.py` inside the existing `GRAPHING` stage, reusing the import edges just
+  resolved for the 0.85 tier. No new status enum, no extra pass over files.
+- **`find_references(symbol, direction)`** — one tool, not two (`CONCEPTS.md` B25), returning
+  chunk-aligned citable `RetrievalHit`s via `chunk.entity_id`. `AgentConfig.tools` +
+  `--no-graph-tools` make the ablation expressible; the prompt drops its guidance too, so a
+  tools-off run isn't an agent told to use a tool it lacks.
+- **Measured (same seed, `--kinds graph --repos all`, n=12):** tool off → on, `ccov`
+  **0.63 → 0.84**, `rcov` 0.82 → 0.91, cited 0.75 → 0.92, tool calls **−28%**, tokens
+  **−30%**. Per repo `ccov`: noetra 0.72 → 1.00, zod 0.33 → 0.83. No regression on the
+  original 46 (cited 0.91 → 0.89 = one question of variance).
+- **Edge quality by hand** at the pinned SHAs: `_get_owned_repository` 5/5, `acquire/release
+  _index_lock` 2/2 and 1/1, `request` 7/7, `finalizeIssue` 4/4. On `requests`, where `request`
+  is defined twice, **all 19 edges resolved to the correct definition** — `self.request()` in
+  `sessions.py` never leaked to `api.py`.
+- **Real bug found and fixed:** zod had **3 import edges for 1,411 entities**, twice
+  misdiagnosed in earlier sessions as "monorepo `@zod/*` aliases". Actual cause: TypeScript
+  `moduleResolution: NodeNext` imports the *emitted* path (`"./util.js"` for `util.ts`), which
+  `resolve_js_import` never stripped. Fixed → **405 import edges**, call edges 675 → 1,324,
+  confidence mix inverted. Had been degrading `list_dependencies` and the repo map for every
+  TS repo since M4. Committed separately (`1021efa`).
+- **Built, measured, reverted:** reference-weighted repo-map PageRank (aider's design). Graph
+  `ccov` 0.84 → 0.72, other 46 cited 0.89 → 0.87. Import edges count *breadth*, call edges
+  count *volume*, and orientation needs breadth — a test helper was promoted into the
+  token-capped top ten and evicted a real source file (`CONCEPTS.md` A31).
+- **Docs realigned:** `CONCEPTS.md` (A28–A31, B24–B27, B20 supersession note, A26 rewritten
+  as a deliberate hold), `LEARNING_LOG.md` (Milestone 8), `RETRIEVAL.md`, `DATA_MODEL.md`,
+  `BUILD_ORDER.md`, `FEATURES.md`, `WORKFLOW.md`, `ARCHITECTURE.md`, `SETUP.md`, `CLAUDE.md`.
+- 45 tests (was 23); ruff/mypy clean on everything touched.
+
+**In progress:** Nothing half-built. M8 is complete and measured.
+
+**Key decisions:**
+- **Build the measurement before the feature** → a saturated benchmark reports nothing either
+  way; the graph bucket + coverage metric had to exist first (A28/A29).
+- **Coverage alongside the booleans, not replacing them** → single-location keys make coverage
+  arithmetically identical to the boolean, so every historical number stays comparable and old
+  checkpoints backfill exactly.
+- **No ambiguous tier** → a wrong edge sends the agent to unrelated code; a missing one only
+  leaves it searching. ARISE's finding, confirmed on `requests`' duplicated `request` (B24).
+- **One `find_references` tool, not `get_callers` + `get_callees`** → shared implementation,
+  flat prompt prefix, and `list_dependencies` is in-repo proof the shape gets called correctly.
+- **Tree-sitter name matching over LSP/SCIP** → precise resolution needs a build or a per-repo
+  language server; we clone arbitrary repos with no deps installed. stack-graphs named as the
+  V2 upgrade path (B26).
+- **Its own question bucket** → judged on the old 46 the tool moves nothing and would have been
+  deleted; it adds a capability rather than improving one (B27).
+- **Narrow answer keys left as is** (user's call) → score quoted as a lower bound. A26 now
+  carries the trap: the `metadata.mdx` question is a `docs` guard-rail and must **not** be
+  widened, or the docs alarm silently stops firing.
+- **Bracket-strict citations left as is** (user's call) → loosening trades false negatives for
+  false positives.
+
+**Next step:** **M9 — metrics + dashboard**, the last V1 milestone: `metrics` pipeline stage,
+`metric` rows, an API endpoint, and the React dashboard (file/function counts, LOC, language
+breakdown, largest files). It is also the only thing that makes `status = READY` reachable —
+the pipeline currently terminates at `embedding`.
+
+**Watch out for:**
+- **`.env.example` has an uncommitted change** (`LANGSMITH_PROJECT` blanked) made outside this
+  session — revert or keep, but it is sitting in the working tree.
+- **LangSmith tracing was disabled by the user this session.** It had been pointing at the EU
+  endpoint, timing out from the container, flooding stderr and inflating the eval's seconds
+  column. Re-enable only with a reachable endpoint.
+- **Module-level call sites are dropped** — `reference_edge.from_entity_id` is not nullable, so
+  a JS/TS `export const x = f()` has no caller and is skipped. Caps one zod eval question at
+  `ccov` 0.67. Documented with its trigger in B24, `DATA_MODEL.md`, and the
+  `enclosing_entity_index` docstring. Deliberate, not an oversight.
+- **Re-seeding is mandatory after any change to `indexer/calls.py`** — edges are built at index
+  time (`eval.seed --force --repos all`, ~2 min, a few cents).
+- **`eval/out/*.jsonl` now holds five tags** from this session (`m8-graph-baseline`,
+  `m8-graph-on`, `m8-graph-off`, `m8-regression`, `m8-refmap`) — re-scoring against widened
+  keys needs no API calls.
+- Git Bash heredocs with quoted bodies still fail intermittently on this machine; write scripts
+  to a file (Write tool) and run them. Python on Windows does not see Git Bash's `/tmp` — use
+  the scratchpad path.
+- Docker Desktop crashed mid-session and had to be restarted; containers were left running.
+- Pre-existing, untouched: 3 ruff findings (`api/auth.py`, init migration), mypy celery stubs
+  and `core/github.py:70`, `retry_repository` still only accepts `FAILED`.

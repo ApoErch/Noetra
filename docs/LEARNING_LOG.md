@@ -156,6 +156,100 @@ is the same number that lets you delete one, and deleting is where it's actually
 
 Worth being precise in interviews about *what* was cut, because the name is overloaded: this
 was symbol-**name** lookup, not graph traversal. Call-graph retrieval ("who calls this?") is
-a different thing on different data and is being built in M7.
+a different thing on different data — it ships as agent tools in M8, after the agent, and
+never as a fused leg (`CONCEPTS.md` B20).
+
+## Milestone 6 — Semantic retrieval + provider layer
+
+**Built:** A second retrieval leg — pgvector cosine search over the same AST-aware chunks, embedded with OpenAI `text-embedding-3-small` through a `core/ai` seam that is the only module importing any AI SDK — fused with the lexical leg via weighted Reciprocal Rank Fusion. Measured on the 46-question harness: line-level `recall@5` **0.72 → 0.85**, `recall@20` **0.78 → 0.91**; the `conceptual` bucket (questions whose words appear nowhere in the code) went 0.36 → 0.57 fused, 0.64 semantic-alone.
+
+**Core concept(s):** **Embeddings for the vocabulary gap** — the one class of question keyword search structurally cannot answer, and why it's a minority for code. **Reciprocal Rank Fusion as a vote**, and why its two constants (`k`, per-leg weight) have to be set by measurement on *your* list depth rather than copied from the paper. **Provider seam + resumable pipeline stage** — `chunk.embedding` nullable, `WHERE embedding IS NULL`, non-fatal on provider failure, so a half-embedded repo stays searchable and a retry continues instead of restarting.
+
+**Recruiter-ready explanation:** Keyword search finds code when the user's words are literally in it, and fails when they aren't — ask "how are credentials protected?" against a file that only says `encrypt` and `token` and it returns nothing. Embeddings fix that: each function is turned into a vector that captures meaning, so the question lands near the right code even with zero shared words. I added that as a second search leg, kept the embedding provider behind a single module so it's a config value, and merged the two result lists with a rank-based vote that doesn't need their scores to be comparable. The first honest measurement was a surprise: the merged list scored *worse* than the semantic leg alone. Digging into the top-20s showed the standard fusion constant, tuned for thousand-deep result lists, made rank nearly meaningless on my twenty-deep ones — anything both searches agreed on, even junk, beat a correct answer only one of them found. Re-tuning the constant and giving the semantic leg a double vote made the merged list beat both legs on their own, and the eval harness is what made every one of those steps a number instead of an opinion.
+
+**Tricky part:** Three things. First, the milestone was built once on Google's free tier and could not be measured there: two separate quotas (per-minute *and* per-day) looked identical in the error, and the search code silently fell back to keyword-only when embedding failed — so a "preliminary" number was really measuring a broken run. Moving to a paid provider, deleting the pacing/batching/retry code outright, and turning the silent fallback into a logged warning is what made the measurement possible. Second, truncating input by an estimated chars-per-token ratio failed on real data: a lockfile's hashes tokenize at ~1.5 chars/token where prose is ~4, and the provider rejects over-long input with a hard 400 — the fix is to count tokens with the model's own tokenizer, not estimate. Third, the fusion result: the intuition "two retrievers merged must beat one" was wrong at the paper's default settings, and the fix came from reading the actual score arithmetic (`1/(60+2)` for a #2 in one list loses to `2/(60+40)` for something at #40 in both) rather than from turning knobs.
+
+## Milestone 7 — The chat agent (agentic RAG)
+
+**Built:** A streamed chat that answers questions about a repository with clickable
+`file:line` citations. A hand-rolled LangGraph loop (`core/agent/graph.py`) gives the model
+three tools — fused search, a capped file reader, and an import-graph lookup — and lets it
+decide per question how many to call. A PageRank-ranked repo map sits in the stable prompt
+prefix; a regex citation verifier strips any location the tools never returned; conversations
+persist in our own tables and stream over SSE into a React chat panel that reuses the Monaco
+highlight path. An agent eval (`eval/agent.py`) scores whether the answer *cites* the right
+place: 42/46 on gpt-5.4-mini, zero fabricated citations across 138 answers.
+
+**Core concept(s):** (1) *Agentic RAG as a tool loop* — retrieval is something the model calls
+mid-reasoning, so an identifier question costs one search and a vague one costs four, and the
+loop is the same ~60 lines either way. (2) *Mechanical guards instead of extra LLM nodes* —
+budget, no-progress check, steering error messages and a citation verifier replace the router
+and grader nodes of the textbook design, because in a tool loop the model already sees each
+result and re-decides. (3) *Tool-result clearing as schema* — only questions and final answers
+are stored and replayed, never old tool outputs, so a long conversation's prompt stays small
+and prompt-cacheable.
+
+**Recruiter-ready explanation:** When you ask a question, the model gets a short table of
+contents of the repo and three tools. It searches, reads only the lines it needs, maybe
+follows an import, and writes an answer with citations in a fixed `[path:lines]` format.
+Before the answer is shown, code (not the model) checks every citation against the ranges the
+tools actually returned that turn and drops any that aren't backed — so a citation you can
+click is always real code the agent saw. Each new question re-runs the loop with the previous
+questions and answers in front of it, which is how the chat "remembers" without ever
+re-sending old search results.
+
+**Tricky part:** Knowing what *not* to build. The first draft had an on/off-topic router and a
+relevance grader as separate LLM calls; the research (a 2026 repo-QA study, Anthropic's tool
+guidance, what Cursor/Claude Code/SWE-grep actually ship) said extra nodes add cost and new
+failure modes without measured gain, and the eval confirmed the simple loop answers identifier
+questions in exactly two calls. The second surprise was in the measurement itself: the repo
+map barely moved recall, but without it the model answered a code question from memory with
+zero tool calls — its real job is keeping the model in "look it up" mode. And three of the
+four remaining "misses" turned out to be correct answers at locations the hand-written answer
+key didn't list, a reminder that one-location keys make every score a lower bound.
 
 <!-- Add new entries above this line, most recent last -->
+
+---
+
+## Milestone 8 — The call graph as an agent tool
+
+**Built:** A second Tree-sitter pass (`indexer/calls.py`) that descends *into* function
+bodies — where the symbol-table walk deliberately stops — and records every call site. Callee
+names resolve against the symbol table in confidence tiers (same file 0.9, one imported file
+0.85, unique repo-wide 0.7) into a new `reference_edge` table, and one agent tool,
+`find_references(symbol, direction)`, walks it in either direction and returns chunk-aligned,
+citable locations. Measured with the tool on vs. off on a new question kind: coverage of the
+correct answer set went 0.63 → 0.84 while tool calls fell 28% and tokens 30%.
+
+**Core concept(s):** (1) *Precision over recall in an approximate graph* — a wrong edge sends
+the agent to unrelated code and it answers from there, while a missing edge only leaves it
+searching; so an ambiguous name resolves to nothing rather than to a low-confidence row per
+candidate. (2) *Reachability is not relevance* — the graph answers "what is connected to this
+location", which is a property of the location, not of the question, so it is a tool the agent
+chooses and never a leg voted into the ranked results. (3) *Build the measurement before the
+feature* — the existing benchmark was saturated and contained no question the graph could
+answer, so it would have reported nothing either way.
+
+**Recruiter-ready explanation:** Search ranks things, and ranking is the wrong tool when you
+want *all* of something. Our search returns at most two results per file, so "show me every
+place this function is called" was impossible by construction — not badly ranked, absent.
+So during indexing we now record every call in the codebase as a row: this function, at this
+line, calls that one. Answering "what would break if I change this?" becomes a database lookup
+that returns the complete list, instead of the model reading files and hoping it spotted them
+all. In the measurement, one such question went from three tool calls and a wrong answer to
+one tool call and a complete one.
+
+**Tricky part:** The milestone could not be measured as planned. The agent eval was at 0.91
+with about one question of real headroom, and none of its 46 questions asked for a *set* of
+locations — so a tools-on/off comparison would have returned noise. Worse, the metric itself
+was blind: `cited` asked "is any citation correct", which scores "found two of five call
+sites" as a win. Both had to be fixed first — a `graph` question kind whose keys list every
+correct location, and a coverage metric — before a single line of extraction code was worth
+writing. Building the measurement first also caught the opposite error at the end: the
+reference-weighted repo map looked free and obviously good, and the eval said it made things
+worse, so it was reverted. And the call graph immediately exposed an old bug it depended on —
+zod had 3 import edges for 1,411 entities, twice written off as "monorepo aliases", actually
+TypeScript importing the emitted `./util.js` path for a `util.ts` source. One fix took it to
+405, which had been quietly degrading the import tool and the repo map for every TypeScript
+repo since M4.

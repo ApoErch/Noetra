@@ -46,7 +46,7 @@ function App() {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-6 bg-gradient-to-b from-zinc-950 to-black px-4">
         <div className="flex flex-col items-center gap-2">
-          <img src="/LogoTransparent.png" alt="Noetra" className="h-64 w-64 object-contain drop-shadow-lg drop-shadow-indigo-600/30" />
+          <img src="/Logo.png" alt="Noetra" className="h-64 w-64 object-contain drop-shadow-lg drop-shadow-indigo-600/30" />
           <h1 className="text-2xl font-semibold tracking-tight text-violet-400">Noetra</h1>
           <p className="text-sm text-zinc-400">Chat with and search any codebase</p>
         </div>
@@ -72,7 +72,7 @@ function App() {
       <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
           <div className="flex items-center gap-2">
-            <img src="/LogoTransparent.png" alt="Noetra" className="h-20 w-20 object-contain" />
+            <img src="/Logo.png" alt="Noetra" className="h-20 w-20 object-contain" />
             <span className="font-semibold text-violet-400">Noetra</span>
           </div>
           <div className="flex items-center gap-3">

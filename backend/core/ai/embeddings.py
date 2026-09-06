@@ -1,129 +1,75 @@
-import math
 from functools import lru_cache
 from typing import Sequence
 
-from google import genai
-from google.genai import types
+import tiktoken
+from openai import OpenAI
 
 from core.config import get_settings
 
-# gemini-embedding-001 silently truncates any single input past ~2048 tokens. Estimating
-# tokens as chars/2.5 OVER-estimates (code is denser than English prose, ~4 chars/token) —
-# safe for the batch budget below, but for a single-text ceiling we need the opposite
-# direction, so this is deliberately conservative (smaller) rather than exact:
-# 2048 tokens * 2.5 chars/token ~= 5000 chars guarantees we cut before the real cap, not after.
-_MAX_INPUT_CHARS = 5_000
-
-_CHARS_PER_TOKEN_ESTIMATE = 2.5
-# First-guess constants, not measured against a real account's limits (Google serves RPM/TPM
-# dynamically per account now, not as a published table — see aistudio.google.com/rate-limit).
-# Conservative on purpose; revisit if the embedding stage starts 400ing or pacing feels wrong.
-_BATCH_TOKEN_BUDGET = 20_000
-_BATCH_MAX_TEXTS = 100
+# OpenAI *rejects* (HTTP 400) any input past 8,192 tokens rather than silently truncating
+# it, so one oversized chunk would fail its whole page. Counted with the model's own
+# tokenizer, not estimated from chars — a lockfile's hashes tokenize at ~1.5 chars/token
+# where prose is ~4, and the first chars/token guess failed on exactly that.
+_MAX_INPUT_TOKENS = 8_000
+# ...and rejects (400) any single request past 300,000 tokens in total. A page of 200 chunks
+# is fine for source files but a repo with big lockfile/markdown gap chunks blew through it
+# (357-chunk noetra import: 200 × up to 8k). Not rate-limit machinery — a hard size limit.
+_MAX_REQUEST_TOKENS = 250_000
 
 
 @lru_cache
-def _client() -> genai.Client:
-    """One cached Gemini client per process — search() calls embed_query on the request
-    path, so rebuilding a client per call would waste connection setup on every search.
-
-    Retry is the SDK's job (Google's own exponential backoff), not ours: a 429 on a
-    per-minute quota window is recovered by a max_delay past 60s, no hand-rolled loop needed.
-    """
+def _client() -> OpenAI:
+    """One cached OpenAI client per process — search() calls embed_query on the request path."""
     settings = get_settings()
-    return genai.Client(
-        api_key=settings.gemini_api_key,
-        http_options=types.HttpOptions(
-            # attempts=5 with exp_base=2's default 1,2,4,8,16s backoff only reaches ~31s
-            # cumulative — measured against a real 429 whose server-suggested retryDelay
-            # was 42s, so 5 attempts burned out mid-window. 9 attempts (1,2,4,8,16,32,64,
-            # 65,65 — capped at max_delay) comfortably spans past a full 60s quota window.
-            retry_options=types.HttpRetryOptions(attempts=9, initial_delay=1.0, max_delay=65.0)
-        ),
-    )
+    if settings.embedding_provider != "openai":
+        raise ValueError(f"unknown embedding provider: {settings.embedding_provider!r}")
+    return OpenAI(api_key=settings.openai_api_key)
 
 
-def _truncate(text: str) -> str:
-    """Cut a text to comfortably fit the model's ~2048-token input cap.
-
-    The API truncates silently past that cap — an over-limit text would embed only its
-    first ~2048 tokens with nothing telling us that happened. Truncating ourselves first
-    means we know exactly what got embedded.
-    """
-    return text[:_MAX_INPUT_CHARS]
+@lru_cache
+def _encoding() -> tiktoken.Encoding:
+    """The tokenizer for the configured embedding model, loaded once per process."""
+    return tiktoken.encoding_for_model(get_settings().openai_embedding_model)
 
 
-def _normalize(vector: list[float]) -> list[float]:
-    """L2-normalize a vector to length 1.0 so cosine distance is meaningful.
-
-    gemini-embedding-001 only pre-normalizes its native 3072-dim output; truncating to 1536
-    (Matryoshka) breaks that guarantee. Skipping this makes cosine distance silently wrong —
-    degraded recall, no error to catch it.
-    """
-    norm = math.sqrt(sum(x * x for x in vector))
-    if norm == 0:
-        return vector
-    return [x / norm for x in vector]
+def _truncate(text: str) -> tuple[str, int]:
+    """Cut a text to at most _MAX_INPUT_TOKENS tokens; returns the text and its token count."""
+    tokens = _encoding().encode(text)
+    if len(tokens) <= _MAX_INPUT_TOKENS:
+        return text, len(tokens)
+    return _encoding().decode(tokens[:_MAX_INPUT_TOKENS]), _MAX_INPUT_TOKENS
 
 
-def _batch(texts: Sequence[str]) -> list[list[str]]:
-    """Group texts into request-sized batches by estimated token budget, not by count.
-
-    A fixed batch size eventually exceeds the API's per-request token ceiling once a few
-    large chunks land in the same batch, regardless of how small the count is. Sizing by
-    estimated tokens avoids that failure mode entirely.
-    """
-    batches: list[list[str]] = []
-    current: list[str] = []
-    current_tokens = 0.0
+def _batches(texts: Sequence[str]) -> list[list[str]]:
+    """Group truncated texts into consecutive batches whose token total stays under the request cap."""
+    batches: list[list[str]] = [[]]
+    used = 0
     for text in texts:
-        estimated = len(text) / _CHARS_PER_TOKEN_ESTIMATE
-        over_budget = current_tokens + estimated > _BATCH_TOKEN_BUDGET
-        if current and (over_budget or len(current) >= _BATCH_MAX_TEXTS):
-            batches.append(current)
-            current, current_tokens = [], 0.0
-        current.append(text)
-        current_tokens += estimated
-    if current:
-        batches.append(current)
+        cut, count = _truncate(text)
+        if batches[-1] and used + count > _MAX_REQUEST_TOKENS:
+            batches.append([])
+            used = 0
+        batches[-1].append(cut)
+        used += count
     return batches
 
 
-def embed_documents(texts: Sequence[str]) -> list[list[float]]:
-    """Embed chunk `embed_text` values for indexing; returns one vector per input, in order.
-
-    task_type=RETRIEVAL_DOCUMENT — the asymmetric encoder's "this is a thing to be found"
-    side (see embed_query for the other side, and docs/RETRIEVAL.md for why they differ).
-    """
+def _embed(texts: Sequence[str]) -> list[list[float]]:
+    """Embed `texts` (in as many requests as the size cap needs); one unit-length vector per input, in order."""
     settings = get_settings()
-    client = _client()
     vectors: list[list[float]] = []
-    for batch in _batch(texts):
-        response = client.models.embed_content(
-            model=settings.gemini_embedding_model,
-            contents=[_truncate(t) for t in batch],
-            config=types.EmbedContentConfig(
-                task_type="RETRIEVAL_DOCUMENT",
-                output_dimensionality=settings.gemini_embedding_dimensions,
-            ),
-        )
-        vectors.extend(_normalize(e.values) for e in response.embeddings)
+    for batch in _batches(texts):
+        response = _client().embeddings.create(model=settings.openai_embedding_model, input=batch)
+        # The API returns items in input order, but sort by index anyway — it is what the field is for.
+        vectors.extend(item.embedding for item in sorted(response.data, key=lambda d: d.index))
     return vectors
 
 
-def embed_query(text: str) -> list[float]:
-    """Embed one search query.
+def embed_documents(texts: Sequence[str]) -> list[list[float]]:
+    """Embed chunk `embed_text` values for indexing."""
+    return _embed(texts)
 
-    task_type=CODE_RETRIEVAL_QUERY — Google's natural-language-to-code retrieval mode,
-    exactly this product's query shape, and the asymmetric counterpart to embed_documents.
-    """
-    settings = get_settings()
-    response = _client().models.embed_content(
-        model=settings.gemini_embedding_model,
-        contents=[_truncate(text)],
-        config=types.EmbedContentConfig(
-            task_type="CODE_RETRIEVAL_QUERY",
-            output_dimensionality=settings.gemini_embedding_dimensions,
-        ),
-    )
-    return _normalize(response.embeddings[0].values)
+
+def embed_query(text: str) -> list[float]:
+    """Embed one search query."""
+    return _embed([text])[0]

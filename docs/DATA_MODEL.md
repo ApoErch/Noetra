@@ -42,7 +42,7 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/models.py`. Everything scope
 | loc | int, nullable | lines of code; only set for parsed languages |
 | content_tsv | tsvector, generated | **powers lexical retrieval.** A Postgres *generated* column (`to_tsvector('english', coalesce(content, ''))`) with a GIN index — it maintains itself on every insert/update, so there is no indexing step to run and nothing to keep in sync. Created in the same migration as the table's M4 changes, which is what makes search work the moment cloning finishes. |
 
-### code_entity  *(the symbol table — powers chunking and the M6 repo map; no longer powers retrieval, see `RETRIEVAL.md`)*
+### code_entity  *(the symbol table — powers chunking and the M7 repo map; no longer powers retrieval, see `RETRIEVAL.md`)*
 | field | type | notes |
 |-------|------|-------|
 | id | uuid (pk) | |
@@ -66,7 +66,7 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/models.py`. Everything scope
 | content | text | the chunk source, as returned to the model |
 | embed_text | text | what was actually embedded: the context prefix (`path › class › signature`) plus `content`. Stored so a re-embed is reproducible and so you can see what the model saw. Also what `content_tsv` is generated over, so the lexical leg gets the context prefix for free. See `RETRIEVAL.md` → chunking rule. |
 | content_tsv | tsvector, generated | **powers lexical retrieval.** `to_tsvector('english', coalesce(embed_text, ''))`, GIN-indexed. Self-maintaining, like `file.content_tsv`. |
-| embedding | vector(1536), **nullable** | pgvector. 1536 = `gemini-embedding-001` truncated from its 3072 default (Matryoshka). Why 1536 and not 3072: pgvector's **HNSW index caps the `vector` type at 2000 dims** — 3072 would force `halfvec`. Vectors are **L2-normalized client-side**, since `gemini-embedding-001` only pre-normalizes at 3072. **Nullable is load-bearing**: the embedding stage selects `WHERE embedding IS NULL`, so a rate-limit failure resumes instead of restarting the whole repo. |
+| embedding | vector(1536), **nullable** | pgvector. 1536 = `text-embedding-3-small`'s native size (and under pgvector's 2000-dim cap for indexing the plain `vector` type, should an ANN index ever be added). Vectors arrive unit-normalized from the provider. Changing the embedding model = a migration here + a full re-embed. **Nullable is load-bearing**: the embedding stage selects `WHERE embedding IS NULL`, so a crash or provider failure resumes instead of restarting the whole repo. |
 
 ### dependency_edge  *(file-level import graph — `list_dependencies`; V2 architecture view)*
 | field | type | notes |
@@ -77,14 +77,27 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/models.py`. Everything scope
 | to_file_id | uuid (fk) | |
 | kind | enum | `import` |
 
-### reference_edge  *(call graph — powers `get_callers`/`get_callees` and the M7 graph leg)*
+### reference_edge  *(call graph — powers the `find_references` agent tool; M8, shipped 2026-09-06)*
 
 Distinct from `dependency_edge`: that one is **file → file** ("does `a.py` import `b.py`"),
 this one is **entity → entity** ("does `handler()` call `decrypt_token()`"). Resolution is
-**name-based** against the symbol table — no type inference — preferring same-file then
-imported-file candidates, and writing **all** candidates when a name is genuinely ambiguous.
-That's the standard "poor man's call graph"; it's approximate on purpose, because it only
-has to orient an agent that then reads the real file.
+**name-based** against the symbol table — no type inference (`CONCEPTS.md` B26) — in tiers:
+same file, then a file this one imports, then a unique repo-wide name. That's the standard
+"poor man's call graph"; it's approximate on purpose, because it only has to orient an agent
+that then reads the real file. Never fused into `search()` — see `RETRIEVAL.md`.
+
+**There is no ambiguous tier.** The original spec wrote one row per candidate at confidence
+0.3 while every tool filtered at `≥ 0.5` — rows written, indexed, and never read. More to the
+point, the error is asymmetric: a wrong edge sends the agent to unrelated code and it answers
+from there, while a missing edge only leaves it searching, which it is already good at. So a
+tier matching more than one candidate resolves to **nothing**, and does not fall through to a
+weaker tier. `CONCEPTS.md` B24 has the reasoning and the measurement (on `requests`, where
+`request` is defined twice, all 19 edges resolved to the correct definition).
+
+Written by `indexer/calls.py` during the `graphing` stage — a second Tree-sitter walk that
+descends *into* function bodies, which the symbol-table walk in `indexer/parser.py`
+deliberately does not. A call site with no enclosing entity (a module-level
+`const x = f()`) is dropped, since `from_entity_id` is not nullable.
 
 | field | type | notes |
 |-------|------|-------|
@@ -93,6 +106,7 @@ has to orient an agent that then reads the real file.
 | from_entity_id | uuid (fk → code_entity) | the caller |
 | to_entity_id | uuid (fk → code_entity) | the callee |
 | line | int | the call site, for citations |
+| confidence | float | resolution tier: 0.9 same file · 0.85 imported file · 0.7 unique repo-wide. Ambiguous names write no row at all. Tools filter at `≥ 0.5`, which excludes nothing today — it is the contract that lets a weaker tier be added later without every caller silently inheriting its guesses. |
 
 ### metric  *(basic only in V1; jsonb so new metrics need no migration)*
 | field | type | notes |
@@ -102,16 +116,30 @@ has to orient an agent that then reads the real file.
 | key | text | `file_count\|function_count\|total_loc\|language_breakdown\|largest_files` |
 | value | jsonb | payload |
 
-### chat_message  *(optional in V1)*
+### chat_conversation  *(one chat thread: user × repository — the agent's memory scope)*
 | field | type | notes |
 |-------|------|-------|
 | id | uuid (pk) | |
+| user_id | uuid (fk → user) | ownership-checked on every read |
 | repository_id | uuid (fk) | |
-| user_id | uuid (fk) | |
+| title | text | first question, truncated |
+| created_at / updated_at | timestamptz | list is ordered by `updated_at` |
+
+### chat_message  *(one question or one final answer — never a tool result)*
+| field | type | notes |
+|-------|------|-------|
+| id | uuid (pk) | |
+| conversation_id | uuid (fk → chat_conversation, cascade) | |
 | role | enum | `user\|assistant` |
-| content | text | |
-| citations | jsonb | list of `{file, start_line, end_line}` |
+| content | text | the answer keeps its `[path:a-b]` citations inline |
+| citations | jsonb, nullable | list of `RetrievalHit` dicts — only citations the verifier backed |
+| tool_trace | jsonb, nullable | `[{name, args, summary}]` — for the UI "steps" block, never replayed to the model |
 | created_at | timestamptz | |
+
+Only these two roles are stored, and only they are replayed as history (last 12 messages per
+turn). Tool results live in the graph state for one turn and are gone — that is what keeps
+the prompt small and cacheable across a long conversation (`RETRIEVAL.md`, Memory). A
+LangGraph checkpointer was considered and rejected for V1 (`CONCEPTS.md` B22).
 
 ## Relationships
 
@@ -120,17 +148,17 @@ user 1───* repository 1───* file 1───* code_entity *───*
                        │           │        ▲              (entity → entity: calls)
                        │           │        │
                        │           1───* chunk ──┘ (chunk.entity_id, nullable —
-                       │           │              this is what resolves a search hit
-                       │           │              back to a symbol the graph can walk)
+                       │           │              maps a graph tool's entity back to
+                       │           │              its chunk, so citations stay aligned)
                        │           *───* dependency_edge  (file → file: imports)
                        ├───* metric
-                       └───* chat_message
+                       └───* chat_conversation 1───* chat_message
 ```
 
-`chunk.entity_id` carries more weight than it looks. It's how the M7 graph leg turns a
-ranked *chunk* into a *seed entity*, and how it turns an expanded entity back into a
-chunk-aligned `RetrievalHit` — which RRF requires, since it dedupes on
-`(file_id, start_line, end_line)`. Gap chunks have it null and simply don't seed.
+`chunk.entity_id` is how a graph tool result (an *entity*) becomes a chunk-aligned
+`RetrievalHit` — the same `path:start-end` shape every other tool emits, so the agent's
+citations never mix entity ranges with chunk ranges. Gap chunks have it null; they are
+never the target of a call edge.
 
 ## Indexes, and when each lands
 
@@ -140,10 +168,10 @@ staging is what the build order in `CLAUDE.md` rests on.
 | index | purpose | milestone |
 |-------|---------|-----------|
 | GIN on `file.content_tsv` | lexical retrieval over whole files | **M4** — one migration, no pipeline cost |
-| `code_entity(repository_id, name)` | symbol lookup (chunking, call resolution, M8 repo map) | **M4** |
+| `code_entity(repository_id, name)` | symbol lookup (chunking, call resolution, M7 repo map) | **M4** |
 | `file(repository_id, content_hash)` | incremental re-index | **M4** |
 | GIN on `chunk.content_tsv` | lexical retrieval over chunks (what `search()` actually uses) | **M5** |
-| `reference_edge(repository_id, to_entity_id)` | `get_callers` — the reverse direction, which is the one that needs the index | **M7** |
+| `reference_edge(repository_id, to_entity_id)` | `find_references(direction="callers")` — the reverse direction, which is the one that needs the index; the forward direction is served by the `from_entity_id` FK index | **M8** ✅ |
 
 **No vector index in V1 (deferred, not forgotten).** `chunk.embedding` has no HNSW/IVFFlat
 index — `semantic_search()` does an exact `<=>` cosine scan. Two reasons: the per-file cap

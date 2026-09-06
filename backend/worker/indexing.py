@@ -13,9 +13,11 @@ from core.models import (
     EntityKind,
     File,
     Language,
+    ReferenceEdge,
     Repository,
     RepositoryStatus,
 )
+from indexer.calls import ExtractedCall, extract_calls, resolve_calls
 from indexer.chunker import chunk_file
 from indexer.graph import resolve_dependencies
 from indexer.parser import ExtractedEntity, detect_language, extract
@@ -138,6 +140,10 @@ def index_repository_files(db: Session, repo: Repository, repo_dir: Path) -> Non
     # It needs both: the entities to align chunk boundaries to real syntax, and the rows to
     # link each chunk back to its symbol. Kept parallel, so index i matches in both lists.
     file_entities: dict[str, tuple[list[ExtractedEntity], list[CodeEntity]]] = {}
+    # Call sites per parsed file path — the call graph's input, resolved in graphing below.
+    # This is a *second* Tree-sitter walk (indexer/calls.py) because the symbol-table walk
+    # above deliberately stops at a function's body, which is exactly where calls live.
+    file_calls: dict[str, list[ExtractedCall]] = {}
 
     for file_row in file_rows:
         if file_row.is_binary or file_row.content is None:
@@ -171,6 +177,7 @@ def index_repository_files(db: Session, repo: Repository, repo_dir: Path) -> Non
 
         file_entities[file_row.path] = (extraction.entities, entity_rows)
         file_imports[file_row.path] = (language, [imp.module for imp in extraction.imports])
+        file_calls[file_row.path] = extract_calls(file_row.content, file_row.path) or []
     db.commit()
 
     logger.info("repo %s: parse stage took %.2fs", repo.id, time.perf_counter() - stage_start)
@@ -186,7 +193,8 @@ def index_repository_files(db: Session, repo: Repository, repo_dir: Path) -> Non
     known_paths = {file_row.path for file_row in file_rows}
     path_to_file_id = {file_row.path: file_row.id for file_row in file_rows}
 
-    for edge in resolve_dependencies(file_imports, known_paths):
+    dependency_edges = resolve_dependencies(file_imports, known_paths)
+    for edge in dependency_edges:
         db.add(
             DependencyEdge(
                 repository_id=repo.id,
@@ -194,9 +202,36 @@ def index_repository_files(db: Session, repo: Repository, repo_dir: Path) -> Non
                 to_file_id=path_to_file_id[edge.to_path],
             )
         )
+
+    # The call graph rides along on the same stage: it needs the import edges just resolved
+    # above (its middle confidence tier is "defined in a file this one imports"), and the
+    # entity rows committed by parsing, whose ids are populated by that commit. Keeping it
+    # here means no new RepositoryStatus value and no extra pass over the files.
+    imported_paths: dict[str, set[str]] = {}
+    for edge in dependency_edges:
+        imported_paths.setdefault(edge.from_path, set()).add(edge.to_path)
+
+    entities_by_path = {path: entities for path, (entities, _) in file_entities.items()}
+    reference_edges = resolve_calls(file_calls, entities_by_path, imported_paths)
+    for reference in reference_edges:
+        db.add(
+            ReferenceEdge(
+                repository_id=repo.id,
+                from_entity_id=file_entities[reference.from_path][1][reference.from_entity_index].id,
+                to_entity_id=file_entities[reference.to_path][1][reference.to_entity_index].id,
+                line=reference.line,
+                confidence=reference.confidence,
+            )
+        )
     db.commit()
 
-    logger.info("repo %s: graph stage took %.2fs", repo.id, time.perf_counter() - stage_start)
+    logger.info(
+        "repo %s: graph stage took %.2fs (%d import edges, %d call edges)",
+        repo.id,
+        time.perf_counter() - stage_start,
+        len(dependency_edges),
+        len(reference_edges),
+    )
     stage_start = time.perf_counter()
 
     # chunking — split every text file into AST-aligned retrieval units

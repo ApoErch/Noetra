@@ -1,60 +1,70 @@
-# Deployment (live, on AWS)
+# Deployment (AWS — one EC2 host, provisioned by Terraform)
 
-Deployed live on AWS, **right-sized on purpose**. The goal is a clean, defensible cloud
-setup — not a service zoo. Everything is containerized; each piece maps to one obvious
-managed service. Scale up only when load demands it.
+The production shape is the **same `docker-compose.yml` that runs locally**, on a single EC2
+instance, with every AWS resource declared in **Terraform**. Right-sized on purpose: V1 load
+is a handful of users and bursty indexing, which one box absorbs. Scale out when it hurts,
+not before.
 
-## Why AWS is justified here (not over-engineering)
+## Why this shape
 
-The indexing pipeline is **long-running and bursty** — a repo import spins up minutes of
-parse/embed work, then idles. That's a real reason to run the **worker as an
-independently scalable service** behind a queue, separate from the always-on API. This is
-the deployment's core story: API and worker scale on different curves.
+- **Zero drift between dev and prod.** One Compose file, one set of images, one `.env`
+  contract. A bug that reproduces locally reproduces on the box.
+- **One bill, one thing to reason about.** No ALB, no ECS task definitions, no ElastiCache —
+  Postgres and Redis are containers on the same host with an EBS volume under them.
+- **Terraform, not console clicks.** The instance, network, IAM, DNS, and storage are code in
+  the repo: reviewable in a PR, reproducible in a new account, destroyable with one command.
 
-## Service mapping
+**Deliberately deferred:** ECS/Fargate, EKS, Lambda, RDS, ElastiCache, multi-AZ. The trigger
+for revisiting is concrete — worker queue depth or API latency that a single instance can't
+absorb. When that happens, the first two moves are: Postgres → RDS (it's the only durable
+state), then the worker → its own instance or ECS service, because `api` and `worker` scale
+on different curves.
 
-| component | AWS service | notes |
-|-----------|-------------|-------|
-| api (FastAPI) | **ECS Fargate** service | behind an **ALB**; autoscale on CPU/req |
-| worker (Celery) | **ECS Fargate** service | separate service; autoscale on queue depth |
-| Postgres + pgvector | **RDS for PostgreSQL** | RDS supports the `pgvector` extension |
-| Redis (broker) | **ElastiCache for Redis** | Celery broker + status |
-| cloned repos / ZIP uploads | **S3** | ephemeral clone artifacts / uploads |
-| secrets, tokens, API keys | **Secrets Manager** (or SSM Parameter Store) | injected into tasks |
-| container images | **ECR** | pushed by CI |
-| frontend (React build) | **S3 + CloudFront** | static hosting + CDN (Vercel is a fine alternative) |
-| DNS / TLS | **Route 53 + ACM** | domain + certs |
+## What runs where
 
-Same container image for `api` and `worker`, different entrypoints — build once, run two
-services.
+| component | where | notes |
+|---|---|---|
+| `api` (FastAPI + LangGraph agent) | container on the EC2 host | `uvicorn`, port 8000 internal |
+| `worker` (Celery) | container on the EC2 host | same image as `api`, different entrypoint |
+| `db` (Postgres + pgvector) | container on the EC2 host | data dir on an **EBS volume** |
+| `redis` | container on the EC2 host | broker + index lock; no persistence needed |
+| `web` (React build) | static files served by **Caddy** on the host | Caddy also terminates TLS (Let's Encrypt, automatic) and reverse-proxies `/api` → `api` |
+| cloned repos (`CLONE_STORAGE_DIR`) | the same EBS volume | disposable — never durable state |
+| secrets (`.env`) | **SSM Parameter Store** (SecureString) | written to `.env` at boot by `user_data`; never baked into an image or AMI |
+| container images | **ECR** | pushed by CI; the host pulls with its instance role |
+| DNS / IP | **Route 53** record → **Elastic IP** | a stable IP survives instance replacement |
 
-## Phased rollout
+## What Terraform owns (`infra/terraform/`, to be created)
 
-**Phase 1 — launch (simplest thing that works).**
-Single EC2 (or Lightsail) running the `docker-compose` stack, or Fargate api/worker +
-RDS + ElastiCache. Frontend on S3+CloudFront (or Vercel). One environment. Ship, get it
-working end-to-end, learn the real load shape.
-
-**Phase 2 — scale when it hurts.**
-Split api/worker into separate Fargate services with independent autoscaling (worker on
-queue depth). Move clone storage to S3. Secrets to Secrets Manager. Add a staging
-environment. This is where the independent-scaling story becomes real.
-
-**Deliberately deferred (and say so):** Kubernetes/EKS, Lambda, service mesh,
-multi-region. None are warranted at this stage — reaching for them early is the
-anti-pattern, not the flex. Add only if scale actually demands it.
+- **Network:** VPC, one public subnet, security group — `443`/`80` open, `22` restricted to
+  an allow-listed CIDR (or SSM Session Manager instead of SSH entirely).
+- **Identity:** an IAM instance role with ECR pull + SSM Parameter Store read. No static AWS
+  keys on the box.
+- **Compute + storage:** the EC2 instance (Amazon Linux 2023 or Ubuntu LTS), an EBS volume
+  mounted at the Compose data path, an Elastic IP.
+- **DNS:** the Route 53 A record.
+- **Bootstrap (`user_data`):** install Docker + Compose plugin, mount the EBS volume, log in
+  to ECR, fetch secrets from SSM into `.env`, `docker compose pull && docker compose up -d`,
+  then `docker compose exec api alembic upgrade head`.
+- **State:** S3 backend with DynamoDB locking, so two people can't apply at once.
 
 ## CI/CD
 
-GitHub Actions: on merge to main → build images → push to ECR → deploy the ECS services
-(`aws ecs update-service` / a deploy action). Run Alembic migrations as a one-off ECS
-task before rolling the api service.
+GitHub Actions on merge to `main`: build the backend image and the frontend bundle → push the
+image to ECR → connect to the host (SSM `send-command`, or SSH) and run
+`docker compose pull && docker compose up -d`, followed by the one-off
+`alembic upgrade head`. Migrations run before the new `api` takes traffic.
 
 ## Operational notes
 
-- `CLONE_STORAGE_DIR` → an S3-backed flow or an ephemeral Fargate volume; clones are
-  disposable, so don't treat them as durable state.
-- RDS is the only durable store — enable automated backups.
-- Worker tasks are idempotent where possible; re-indexing by `content_hash` already
-  supports safe retries.
-- Health checks: ALB → api `/health`; worker liveness via Celery ping.
+- **Backups:** scheduled EBS snapshots (Data Lifecycle Manager) cover Postgres and the clone
+  volume in one go; clones are disposable, the database is not.
+- **Health:** `/health` on `api` behind Caddy; a Route 53 health check or an external uptime
+  monitor. Worker liveness via `celery inspect ping`.
+- **Restarts:** Compose services carry `restart: unless-stopped` so a reboot brings the
+  stack back without intervention.
+- **Idempotent work:** worker tasks re-index by `content_hash` and embed `WHERE embedding IS
+  NULL`, so an interrupted job resumes on retry rather than starting over.
+- **Sizing:** start with a small general-purpose instance and a modest EBS volume; the
+  embedding stage is network-bound, not CPU-bound, and Tree-sitter parsing is the only
+  CPU-heavy step.

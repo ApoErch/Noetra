@@ -5,6 +5,7 @@
 __pycache__/
 *.pyc
 backend/.venv/
+backend/eval/out/
 
 # node
 web/node_modules/

@@ -57,14 +57,14 @@ Citations always come from the actual search results, not from the model's memor
   database as everything else.
 - **Parsing** — Tree-sitter, one parser API with a grammar per language.
 - **Agent** — LangGraph, running a hand-written loop: search, read, decide, answer.
-- **AI provider** — Google Gemini, one model for chat and one for embeddings.
+- **AI provider** — OpenAI (`text-embedding-3-small` for embeddings, `gpt-5.4-mini` for chat
+  by default; Anthropic available for chat).
 - **Local infra** — Docker Compose (Postgres, Redis, API, worker, frontend).
 
 ## Running it locally
 
 **Prerequisites:** Docker + Docker Compose, Python 3.11+ with `uv`, Node 20+ with `pnpm`,
-a GitHub OAuth app (client ID + secret), and a [Google Gemini API key](https://aistudio.google.com/apikey)
-(the free tier is enough).
+a GitHub OAuth app (client ID + secret), and an [OpenAI API key](https://platform.openai.com/api-keys).
 
 ```bash
 # copy environment templates and fill in your own secrets

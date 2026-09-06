@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import Editor from '@monaco-editor/react'
 import { languageForPath } from '../lib/language'
-import type { Highlight } from '../lib/search'
+import type { Highlight } from '../lib/chat'
 
 export type FileContent = {
   id: string

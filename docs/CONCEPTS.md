@@ -1,1473 +1,788 @@
-# Concepts — personal glossary
+# Concepts — problems we hit, decisions we made
 
-Plain-language notes on tools/patterns that were new to me when they first showed up in
-this project. Not recruiter-facing (that's `LEARNING_LOG.md`) — this is just for me to
-look things up later without re-deriving them.
+Written to be read before an interview. Two sections:
 
----
+- **A. Problems encountered** — each entry: what broke, *why* it broke, what the failure is
+  called in general (so it can be looked up), and how we solved it.
+- **B. Design decisions** — each entry: what we chose, the real alternative, why ours wins
+  *here*, and what would change the answer.
 
-## Fernet encryption (from the Python `cryptography` package)
-
-**What it is:** a way to scramble text (encrypt) using a secret key, and unscramble it
-(decrypt) later using that same key. "Symmetric" just means the same key does both
-directions — unlike password hashing, which only ever goes one way.
-
-**Why we need it here:** we store a user's real GitHub access token in the database
-(so the backend can call the GitHub API on their behalf later — e.g. to clone a private
-repo). If the database ever leaked, a token stored in plain text would let an attacker
-act as that user on GitHub. Since we need the *original* token back (not just to check
-if it matches, like a password), hashing doesn't work — hashing is one-way. Encryption
-is the right tool because it's reversible with the key.
-
-**How it's used in Noetra:**
-- `core/security.py` holds `encrypt_token()` / `decrypt_token()`, built on
-  `cryptography.fernet.Fernet`.
-- The key comes from an env var, never hardcoded or committed.
-- `core/github.py` (the OAuth flow) calls `encrypt_token()` right before saving a user's
-  access token to the DB, and `decrypt_token()` whenever the token needs to be used
-  again (e.g. cloning a private repo).
-
-**Is this standard?** Yes — any app that stores third-party OAuth tokens (GitHub,
-Google, Slack integrations, etc.) encrypts them at rest. It's a different threat model
-from password storage: passwords are hashed (never need the original back), tokens are
-encrypted (the original value is needed again to make API calls).
-
-**Docs:** [`cryptography` Fernet docs](https://cryptography.io/en/latest/fernet/)
+Per-milestone narrative lives in `LEARNING_LOG.md`; this file is the index of individual
+stories. Entries are in the order they happened.
 
 ---
 
-## `uv` and `.venv` — why both exist
+## A. Problems encountered
 
-**The confusion:** if I'm using `uv`, why is there still a `.venv` folder? Isn't `uv`
-supposed to replace that?
+### A1. The host's `.venv` leaked into the Linux containers
 
-**The actual relationship:** `uv` is not an alternative *to* virtual environments — it's
-a faster replacement for the *tooling* that manages one (`pip` + `venv` + `poetry`, all
-in one Rust binary). Python still needs an isolated folder containing its own interpreter
-reference and installed packages, so this project's dependency versions don't collide
-with other Python projects or the system Python. That isolated folder is the `.venv` —
-same concept as always, just created and kept in sync automatically instead of by hand.
+**Problem:** `api` and `worker` both crashed on startup fighting over `/backend/.venv`
+(`Directory not empty`); later, `uv add` on Windows broke on Linux symlinks (`lib64 -> lib`).
+**Why:** `./backend:/backend` is bind-mounted for live reload, so the host's Windows-built
+`.venv` shadowed the image's Linux venv. Both containers then tried to rebuild it at once.
+**Name:** bind-mount shadowing; host/container toolchain mismatch.
+**Fix:** an anonymous volume at `/backend/.venv` on both services. Docker layers the more
+specific mount on top, so each container keeps a private Linux venv while the source is
+still bind-mounted. Host `.venv` (mypy, ruff, `uv add`) and container `.venv` (what runs)
+are deliberately separate.
 
-**What changes day to day:**
-- Old way: `python -m venv .venv`, activate it, `pip install -r requirements.txt`,
-  manually keep a lockfile in sync.
-- `uv` way: `uv add <package>` does all of that in one step — updates `pyproject.toml`,
-  resolves a lockfile, creates `.venv` if it's missing, installs into it. Much faster
-  due to a global cache and Rust implementation.
+### A2. GitHub's `repo` scope has no read-only variant
 
-**Gotcha hit in this project:** a `.venv` created *inside the Linux container* (via
-`docker compose exec` before the anonymous-volume isolation was set up in
-`docker-compose.yml`) leaked onto the Windows host through the bind mount. Linux venvs
-contain symlinks (e.g. `lib64 -> lib`) that Windows tools can't cleanly modify, which
-broke `uv add` until that stale `.venv` was deleted and regenerated natively on Windows.
-Lesson: the host `.venv` and the container's `.venv` are meant to be entirely separate
-(that's what the `- /backend/.venv` anonymous volume line in `docker-compose.yml`
-enforces) — one is for host tooling (mypy, ruff, `uv add`), the other is what actually
-runs inside the container.
+**Problem:** Noetra only ever reads code, but the token it stores can push to the user's repos.
+**Why:** classic OAuth Apps expose one scope for private-repo *contents* — `repo`, read+write.
+Read-only "Contents" permissions exist only on GitHub Apps, a different integration model
+(installation tokens, different registration flow).
+**Name:** least privilege violated at the *credential* level, not the *behaviour* level.
+**Fix:** accepted and documented. Safe because V1 has no write-capable code path at all. The
+moment a write feature is added, migrate to a GitHub App — this is the recorded trigger.
 
-**Docs:** [uv docs — projects](https://docs.astral.sh/uv/guides/projects/)
+### A3. `Bearer` auth works on api.github.com and silently fails on git clone
+
+**Problem:** `git clone` with `Authorization: Bearer <token>` failed with "could not read
+Username", as if no credentials were sent — the same token worked fine against the REST API.
+**Why:** github.com's git-over-HTTPS server and its REST API are different systems with
+different auth conventions. The git server only understands HTTP **Basic**; `Bearer` is not a
+scheme it checks for, so the request looks anonymous.
+**Name:** one host, two auth surfaces.
+**Fix:** `Authorization: Basic base64("x-access-token:<token>")` for clones (`worker/tasks.py`);
+`Bearer` stays for REST (`core/github.py`). Same token, two header formats.
+
+### A4. The clone header — and therefore the token — got persisted into `.git/config`
+
+**Problem:** passing the token as `git -c http.extraHeader=... clone` was chosen precisely so
+it would never touch disk (unlike a token-in-URL). Reading `dest/.git/config` afterwards
+showed the header sitting there under `[http]`.
+**Why:** `-c` is process-local for most git commands, but `git clone` must persist some config
+into the new repo (remote URL, tracking branch) and it carries `http.*` overrides along with
+it — sensible for `http.postBuffer`, dangerous for a credential.
+**Name:** credential leakage through persisted configuration; "verify empirically, don't trust
+the general rule for the specific command".
+**Fix:** `git config --unset-all http.extraHeader` inside the destination immediately after a
+successful clone. The eval seed avoids it entirely by using `-c` on `fetch`, not `clone`.
+
+### A5. `import worker` worked for `uvicorn` and crashed for `celery`
+
+**Problem:** the worker died on start with `ModuleNotFoundError: No module named 'worker'`,
+same working directory and same files as the API, which imported everything fine.
+**Why:** `sys.path` depends on *how* Python is started. Console-script entry points
+(`.venv/bin/uvicorn`, `.venv/bin/celery`) do not add the cwd. `uvicorn` special-cases this
+when resolving `api.main:app`; `celery` does not.
+**Name:** implicit vs explicit import roots; relying on one tool's convenience behaviour.
+**Fix:** `PYTHONPATH=/backend` set explicitly on both services in `docker-compose.yml`.
+
+### A6. Real repos broke "every tracked path is a readable text file"
+
+**Problem:** importing `fbsamples/f8app` crashed the bulk `INSERT`; importing the Linux kernel
+raised `IsADirectoryError`. Small test repos never showed either.
+**Why:** (1) NUL bytes are valid UTF-8, so `.decode()` succeeds — but Postgres `text` rejects
+`\x00`. (2) `git ls-files` lists symlinks like files; a symlink's tracked *content* is the
+target path string, and reading through one that points at a directory crashes.
+**Name:** input-assumption failures that only appear at real-world scale.
+**Fix:** check raw bytes for `\x00` before decoding; `Path.is_symlink()` → store
+`Path.readlink()` (what git itself considers the content). Plus a 1 MB per-file cap and a
+top-level `try/except` so a crash marks the repo `failed` instead of leaving it stuck at
+`cloning` forever.
+
+### A7. A caught exception's `str()` would have written the token into the database
+
+**Problem:** adding a clone timeout meant catching `subprocess.TimeoutExpired`. Its default
+string form contains the full command list — including the Basic-auth header.
+`repo.error_message = str(exc)` would have shown a live token in the UI.
+**Why:** exception messages routinely embed their inputs (argv, headers, request bodies).
+**Name:** secrets leaking via logs/error messages.
+**Fix:** catch `TimeoutExpired` in its own `except` before the generic one and hand-write the
+message (`"Clone timed out after Ns"`).
+
+### A8. Two clicks on Retry raced two clones of the same repo
+
+**Problem:** `retry_repository` re-enqueued `clone_repository` on every call; two fast clicks
+both saw `status == FAILED` and both started `rmtree` + clone on the same directory.
+**Why:** check-then-act across two processes (`api` enqueues, `worker` runs) with no shared
+lock. A Python lock is per-process; `api` and `worker` are separate containers.
+**Name:** race condition; the fix is a distributed lock — more precisely a **lease**
+(self-expiring lock).
+**Fix:** Redis `SET lock:index:{repo_id} 1 NX EX 600` (`core/redis_client.py`) — atomic
+check-and-set in one round trip; TTL is a crash-only safety net well above the 300 s clone
+timeout; released in the worker's `finally`. A second attempt gets `False` → 409. Known
+sharp edge left unbuilt: no fencing token, because no task can outlive the TTL yet.
+The *other* race (two simultaneous imports of one URL) was already closed by a DB unique
+constraint — a permanent uniqueness rule belongs in Postgres, not re-implemented in Redis.
+
+### A9. Adding an enum column to an existing table: `type "file_language" does not exist`
+
+**Problem:** the same `sa.Enum(...)` that worked in `CREATE TABLE` failed in
+`op.add_column` on `files`.
+**Why:** SQLAlchemy creates the Postgres enum type as part of building a table from scratch;
+a bare `ALTER TABLE ... ADD COLUMN` doesn't infer "and create this type first".
+**Name:** Alembic/Postgres enum gotcha.
+**Fix:** `postgresql.ENUM(...).create(bind, checkfirst=True)` first, then the column with
+`create_type=False`; mirror on downgrade. Nothing needed manual cleanup after the failure
+because Postgres DDL is **transactional** — the whole migration rolled back (MySQL would have
+left a half-applied schema).
+
+### A10. `alembic --autogenerate` proposed dropping two working indexes
+
+**Problem:** the migration after the GIN indexes generated `drop_index` for both.
+**Why:** those indexes were `op.execute("CREATE INDEX ... gin_trgm_ops")` — raw SQL, because
+`Index()` can't express the operator class — so they don't exist in `Base.metadata`.
+Autogenerate diffs the live DB against metadata; an index it can't see looks "removed".
+**Name:** metadata-diff blind spot.
+**Fix:** hand-strip the drops; standing rule: **read every generated migration's `upgrade()`
+and `downgrade()` before applying it**.
+
+### A11. Import resolution took ~8 minutes on TensorFlow
+
+**Problem:** the graphing stage on a 36k-file repo stalled for minutes.
+**Why:** each absolute Python import scanned every known path for a suffix match —
+O(imports × files), tens of millions of string comparisons over data that never changes
+between scans.
+**Name:** repeated linear scan → precomputed index (the time/space trade-off behind every
+hash map, DB index, and symbol table).
+**Fix:** `build_suffix_index` once per repo (every path suffix → matching paths), then O(1)
+lookups. ~10,000× faster at that scale, identical output.
+
+### A12. Deleting a repo left its clone on disk forever
+
+**Problem:** DB rows cascaded away; `/data/repos/{id}` stayed, growing unbounded.
+**Why:** nothing told the worker's volume. And the obvious fix — `shutil.rmtree` in the
+`DELETE` endpoint — violates the project rule that `api` never does slow, repo-touching work.
+**Name:** deferred cleanup / eventually-consistent side effects.
+**Fix:** the endpoint deletes the authoritative record and returns; it enqueues
+`worker.tasks.delete_repository_clone` to reclaim disk whenever the worker gets to it.
+Nothing reads the directory once the row is gone, so the delay is harmless.
+
+### A13. Conceptual questions scored exactly 0.00 recall
+
+**Problem:** the first eval baseline: symbol 1.00, keyword 0.79, conceptual **0.00**. Not
+ranked badly — an empty result list.
+**Why:** `websearch_to_tsquery` joins bare terms with **AND**. A natural-language question
+demands every surviving word in one document; almost none contain all of them.
+**Name:** query relaxation (Elasticsearch's `minimum_should_match`; Postgres has no equivalent).
+**Fix:** strict pass first, then an OR-rewrite backfilling unused slots. Strict hits keep
+their positions, so precision cannot regress — the eval proved it (symbol/keyword byte-identical,
+conceptual moved). Honest footnote: this was only half the story — the target file often
+uses different vocabulary entirely (`encrypt`/`token` vs "credentials protected"), which is
+the semantic leg's job.
+
+### A14. Retrieval found the right file, then cited line 1
+
+**Problem:** 6 of 9 remaining misses were "right file, wrong line".
+**Why:** the index matched on Postgres **lexemes** (stems: `credenti`) while `_best_line`
+matched literal words ("credentials"). A stem-only match scored zero on every line and fell
+back to line 1.
+**Name:** vocabulary drift — never reimplement a component's normalization; ask it what it did.
+**Fix:** `tsvector_to_array(to_tsvector(...))` returns the engine's own lexemes; match by
+stem prefix, score lines with their neighbours. `@20` 0.69 → 0.79. Then chunk-level retrieval
+made `_best_line` irrelevant entirely — a chunk knows its own line range.
+
+### A15. Switching to chunks *regressed* `recall@20` (0.79 → 0.74)
+
+**Problem:** 20 slots used to mean 20 files; with chunks it meant 20 chunks from 10 files.
+`docs/CONCEPTS.md` alone took 8 of 20.
+**Why:** arithmetic, not ranking — one strong document crowds everything else out.
+**Name:** result diversity / "collapsing" (Elasticsearch `collapse`; MMR is the general form).
+**Fix:** `row_number() OVER (PARTITION BY file_id ORDER BY rank DESC)` with a cap of 2 per
+file — in SQL, in a subquery, because `LIMIT 20` would already have discarded the other files
+before Python could cap anything. Re-applied once more *after* fusion, since two legs each at
+their cap can still put one file in 4 slots.
+
+### A16. Prose about code outranked the code (`LICENSE` beat the implementation)
+
+**Problem:** for natural-language queries, noetra's entire top-20 was `docs/*.md`; requests
+returned `HISTORY.md` and `LICENSE` ahead of the module.
+**Why:** the `english` text-search config is built for English prose, so it scores writing
+*about* code higher than code. Relevance and importance are different things; a scorer only
+knows the first.
+**Name:** query-time boosting.
+**Fix:** `ts_rank × 0.3` where `file.language IS NULL` (exactly the non-py/js/ts set). Docs
+stay reachable, just below code. Conceptual `@5` 0.14 → 0.36. Chunking + A15 + A16 together:
+`@5` 0.60 → 0.76.
+
+### A17. The eval couldn't referee the fix in A16
+
+**Problem:** every one of the 42 original answers lived in a source file. Demoting non-source
+files could only ever raise the score — a factor of 0.001 would have "scored better" while
+making documentation unreachable.
+**Why:** a benchmark can only judge a change its answer key is neutral about.
+**Name:** construct validity / benchmark gaming / Goodhart's law.
+**Fix:** a fourth question kind, `docs` — 4 questions whose answers genuinely live in prose,
+as a guard-rail (it reports `@5 0.75 / @20 1.00`, confirming 0.3 demotes without burying).
+Kept as a *separate kind* so the original buckets' denominators stayed comparable to every
+earlier run. Habit: before trusting a number, ask "could this go up while the product gets
+worse?"
+
+### A18. The Celery worker kept running old pipeline code while the API auto-reloaded
+
+**Problem:** after adding the chunking stage, search silently returned nothing.
+**Why:** `uvicorn --reload` picked up the new reader (`search()` over `chunks`); the
+long-running Celery worker has no auto-reload and kept executing the writer it loaded at
+startup — which never wrote chunks.
+**Name:** reader/writer version skew between processes.
+**Fix:** restart the worker after any pipeline change; treat "search returns nothing after a
+pipeline edit" as this first.
+
+### A19. Structural (trigram symbol-name) retrieval was worth +0.04 — so it was deleted
+
+**Problem:** the second retriever cost a module, a `pg_trgm` index, extra fusion code, and
+frontend fields. Was it earning its keep?
+**Why:** AST chunking means a function's own definition line is usually the top *lexical*
+hit for its name already. The ablation (46 questions, in vs out) showed `@5` 0.76 vs 0.72,
+every point from one `$`-prefixed identifier the tokenizer mangles.
+**Name:** ablation; "no retriever joins the fusion without a `recall@k` movement that
+justifies it" — a rule that cuts as readily as it admits.
+**Fix:** removed the module, the enum slot, the frontend fields, and the index (own migration);
+re-ran the eval to confirm 0.72/0.78 reproduced exactly. Noted precisely: this was
+symbol-**name** lookup, not graph traversal (M8), which is different data and unaffected.
+
+### A20. Free-tier quotas and a silent fallback made M6 unmeasurable
+
+**Problem:** the semantic leg was built against Gemini's free tier. Mid-eval the run hit a
+429 that no backoff recovered; a "preliminary" number (conceptual +0.07) turned out to be
+untrustworthy because `search()` silently degraded to lexical-only whenever the embedding
+call failed — the run *looked* normal.
+**Why:** three things stacked. (1) Two separate quotas on one endpoint — 100 req/min *and*
+1,000 req/day — distinguishable only by the error's `quotaId`; the per-minute retry logic
+was useless against the daily one. (2) Growing machinery to work around a free tier (SDK
+retry tuning, token-budget batching, inter-page sleeps, 9-attempt backoff) — real engineering
+spent on a constraint that $0.02/M tokens removes. (3) A degraded path with no log line is
+indistinguishable from the healthy path.
+**Name:** pacing vs backoff (avoid vs react); observability of degraded modes; build-vs-buy.
+**Fix:** switched to OpenAI `text-embedding-3-small` (paid, high limits, native 1536 dims,
+provider-normalized vectors — which also deleted the client-side L2 normalization and
+asymmetric `task_type` handling Gemini needed). Deleted the pacing/batching/retry code
+outright rather than parameterising it; `core/ai` is ~40 lines and the provider is a config
+value. The silent `except: pass` became `logger.warning(...)`, so an eval run shows whether
+semantic actually ran. The measurement is redone from scratch on the new provider — a
+provider switch changes the embedding space, so old vectors are wiped, not mixed.
+
+### A21. GitHub returned 503 for authenticated requests with no `User-Agent`
+
+**Problem:** the OAuth callback's profile fetch failed with a `503`, not a `401`/`403`.
+**Why:** GitHub's REST API requires a `User-Agent` on every request and answers its absence
+with an opaque 503.
+**Fix:** set the header in `core/github.py`; traced by comparing an unauthenticated request
+(clean 401) against the authenticated one inside the container, then confirming in the docs.
+
+### A22. Fusion scored *worse* than either leg alone
+
+**Problem:** the first clean M6 run on noetra: lexical `@5 0.81 / @20 0.94`, semantic
+`0.88 / 0.88`, **fused `0.81 / 0.88`** — worse than each leg on the metric that leg was
+good at. Dumping the top-20 for one conceptual question showed lexical had the answer at #4,
+semantic at #2, and the fused list had it *nowhere* — all 20 fused hits were tagged
+"found by both legs".
+**Why:** RRF scores `Σ 1/(k + rank)`. With the paper's `k=60` and each leg handing fusion 40
+candidates, `1/(60+2) = 0.016` for a #2 in one leg loses to `2/(60+40) = 0.020` for something
+at rank 40 in *both* — rank is nearly flat at that `k`, so "appears in both lists at all"
+becomes the dominant signal. On a 248-chunk repo the two legs share most of their mediocre
+tail (`models.py`, `alembic.ini`, migrations), and that agreed-upon junk crowded out each
+leg's best hit. `k=60` was tuned on TREC runs 1,000 deep, where rank still carries signal at
+that depth; on 20-deep lists it doesn't.
+**Name:** RRF on short lists; the fusion pool being wider than the signal.
+**How we solved it:** a 6-config sweep on the harness (fetch depth 20/40 × `k` 60/10/1),
+before touching code. The knobs interact: shrinking the fetch alone fixed `@20`; lowering
+`k` alone made `@5` *worse* (40 candidates + small `k` lets deep single-leg junk in).
+Together — **fetch `limit` per leg, `k=10`** — fusion ties the best single leg on both
+`@5` (0.88) and `@20` (0.94) and covers each leg's weak bucket (keyword back to 1.00, docs
+back to 1.00). `k<10` buys nothing. One conceptual hit semantic finds at #2 still doesn't
+survive fusion — a real limit of rank-only fusion over two legs, not a tuning miss.
+On the full 46 the re-tune held (fused 0.72 → 0.78 `@5`) — but it also exposed the bigger
+fact the 16-question run had hidden: **semantic alone scores 0.85**, so equal-vote fusion was
+a net −0.07, concentrated in `conceptual`. RRF is a vote; with equal weights lexical (0.36
+on conceptual alone) could out-vote semantic (0.64) whenever their junk overlapped. Yet
+semantic-only *loses* docs (1.00 → 0.75) and keyword `@20` (1.00 → 0.93) — questions only
+lexical gets. **Weighted RRF, semantic 2×**, resolved it: 0.85 / 0.91, semantic's `@5` plus
+lexical's coverage, beating both legs alone. At 3× the result is byte-identical to
+semantic-only — the weight where a leg stops mattering is itself measurable. Standing
+caveat: the eval feeds raw English, which flatters semantic; the agent will send
+identifier-shaped queries where the two legs tie. Numbers in `RETRIEVAL.md`.
+
+### A23. The graph leg couldn't be measured before the agent existed
+
+**Problem:** M7 was planned as a call graph fused into RRF as a third leg, ending with the
+same in/out `recall@k` ablation that cut A19. Pressed on *why* fusion, the design didn't
+hold: graph traversal takes a location and returns connected locations — that's
+reachability, not an estimate of query relevance, which is the one thing RRF assumes each
+leg provides. And a leg seeded from the other two isn't independent; it can only amplify
+their vote. Once the graph stops being a fused leg there is no `recall@k` to ablate — the
+only place its value shows up is inside the agent loop, and the agent didn't exist yet.
+**Why:** the build order had been written leg-by-leg ("each leg ends with a measured delta")
+and the graph got slotted in as a leg because that was the shape of the sentence, not
+because it was one.
+**Name:** measure-then-buy applied to milestone order; the LocAgent-style tools-on/off
+ablation.
+**How we solved it:** checked what the field does before rewriting anything — LARGER,
+RepoGraph, LocAgent, CodexGraph, Codebase-Memory, GraphRAG-Bench, CodeCompass, plus
+Sourcegraph, Augment, Greptile, Aider, Claude Code. Nobody fuses graph neighbours into a
+ranked list (B20). Swapped the milestones: the agent ships first with the tools that already
+exist (`code_search`, `read_file`, `list_dependencies`), producing an agent eval; the call
+graph lands after it as `get_callees`/`get_callers` and is measured on that eval with the
+tools on vs. off, plus an edge-quality eval of the resolved graph itself.
 
 ---
 
-## OAuth App `repo` scope has no read-only option
+### A24. `read_file` crashed on every file ending in a newline — and the agent burned its whole budget on it
 
-**The gotcha:** GitHub's classic OAuth Apps (what Noetra registered) only offer the
-`repo` scope for accessing private repository code, and per GitHub's own docs that
-scope always grants "full access... including read **and write**." There is no
-`repo:read`-style narrower scope for OAuth Apps — the only other repo-related scopes
-(`repo:status`, `repo_deployment`, `repo:invite`) cover things like commit statuses and
-deployments, not repository contents at all.
+**Problem:** the first smoke run of the agent scored 3/3 cited but took 8 tool calls per
+question. The trace showed `read_file` failing six times in a row with `list index out of
+range`; the model kept retrying with different line ranges, then answered from the search
+snippets alone. The line count was computed as `content.count("\n") + 1`, which is one more
+than `splitlines()` returns for a file that ends in a newline — i.e. nearly every file.
+**Why:** the tools node catches every exception and hands the message back to the model as
+text (so a bad argument can't kill a turn). Correct design, but it turned a crash into a
+silent budget drain — the eval's `calls/question` column is what made it visible, not an
+error log.
+**Name:** off-by-one on trailing newline; the "swallowed error becomes wasted tool calls"
+failure mode that makes per-question cost a first-class eval metric.
+**How we solved it:** count lines with `len(splitlines())` everywhere; added a unit test on
+a trailing-newline file. Calls per symbol question went 7.0 → 2.0 and tokens 14k → 5k.
 
-**Why it can't be narrowed here:** true read-only access (e.g. a "Contents: Read-only"
-permission) only exists on **GitHub Apps**, which use fine-grained permissions instead
-of scopes. GitHub Apps are a different integration model entirely — different
-registration flow, different install step, and installation tokens instead of a simple
-OAuth bearer token. Switching would mean redesigning the auth milestone, not editing a
-scope string.
+### A25. Without the repo map, the model answered from memory with zero tool calls
 
-**The decision for V1:** keep the OAuth App and the `repo` scope, accept that the
-stored token is *more privileged than the app uses*. This is safe in practice only
-because Noetra's V1 scope is read-only end to end (clone, parse, index, chat, search,
-metrics) and no write-capable endpoints (commit, push, PR comment, etc.) are planned —
-so the token's write capability is never exercised by any code path, even though it
-technically exists. If a write feature is ever added later, this decision needs
-revisiting (likely: migrate to a GitHub App at that point).
+**Problem:** the repo-map ablation on gpt-5.4-mini lost one question — not to a retrieval
+miss but to the model answering "git clone basic auth header" from its own knowledge,
+making **no tool calls** and citing nothing. With the map in the prompt it searched, read,
+and cited correctly. On gpt-4.1-mini the map made no measurable difference either way.
+**Why:** a system prompt that only *describes* tools is easy to skip when the model already
+"knows" the answer; a concrete listing of the repo's files and symbols anchors it to *this*
+codebase and makes "look it up" the obvious move.
+**Name:** grounding pressure — the map's value is behavioural, not recall.
+**How we solved it:** kept the map (1,500 tokens/turn). The agent eval now reports tool
+calls per question, so a zero-call answer to a code question is visible as a miss.
+**Honest cost note (46 questions):** the map added +0.04 cited — two questions, inside the
+noise — and the raw token column nearly doubled (6.7k → 11.6k/question) because the prompt
+is re-sent on every model call. Those are cached-prefix tokens (same wall-clock either way),
+but the eval doesn't yet split cached from uncached input, so the real price is unmeasured.
+Open follow-ups: cents/question from `usage_metadata`, and an 800-token map.
 
-**Why this matters / interview framing:** this is a "principle of least privilege" gap
-at the *credential* level (the token can do more than the app does), separate from
-whether the *app's behavior* is safe. It's a known, documented platform limitation of
-OAuth Apps vs. GitHub Apps — worth naming explicitly rather than treating as an
-oversight.
+### A26. The answer keys are narrower than the truth — three of four "misses" were correct answers
 
-**Docs:** [OAuth Apps: scopes](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps) · [GitHub Apps vs OAuth Apps](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/differences-between-github-apps-and-oauth-apps)
+**Problem:** on all 46 questions gpt-5.4-mini scored 42 cited. Reading the four failures
+against the code: zod's "attach descriptive information without altering the schema" was
+answered with `.describe()`/`.meta()` (which clone and register) while the key pointed at
+`registries.ts`; "how is a schema's shape copied" was answered with `extend()`'s spread
+copy while the key listed two helpers 200 lines earlier in the same file; "how do I attach
+metadata" cited lines 81–105 of the same `metadata.mdx` the key pins at 13–35. Only
+"Transfer-Encoding chunked" was a real miss (docs + tests cited instead of `prepare_body`).
+**Why:** the keys were written by one person on 2026-07-26 by reading each repo at its
+pinned SHA and recording *the* location — one per question — and were validated only for
+path existence, never reviewed for completeness. A one-location key makes the score a lower
+bound: any correct answer elsewhere counts as a miss.
+**Name:** answer-key coverage; scores as lower bounds.
+**How we solved it:** reviewed 2026-09-06 and **deliberately left as is** — the score is
+quoted as a lower bound instead. The fix, when taken, is to add the verified alternative
+locations as extra `answers` entries (the YAML already allows several) and re-score the
+stored JSONL answers offline, no API cost.
 
----
+Two things to get right when doing it. **First, the rule has to be about the codebase, not
+the model** — widening a key because the model cited something is how a benchmark rots into
+accepting anything. The test: open the location, hide the answer, ask "does this answer the
+question as asked?" If yes it belonged in the key already and the key was written lazily.
+**Second, one of the three must not be widened at all.** "How do I attach metadata to a
+schema?" is a `docs` question, and that bucket exists as the alarm that fires if
+`_NON_SOURCE_RANK_FACTOR` is ever tuned hard enough to bury documentation
+(`RETRIEVAL.md` → Evaluation). Letting it also accept the source implementation would make it
+pass while docs are unreachable — silently disabling the guard-rail. Reword that one to ask
+for the docs specifically, or leave it failing; do not widen it.
 
-## Signed session cookies (Starlette `SessionMiddleware` / `itsdangerous`)
+**Worth noting for the interview:** this only distorts the *scoreboard*, never the product.
+The citation verifier checks a citation against the ranges the tools returned that turn, not
+against the answer key — the key does not exist at runtime. Both the key's location and the
+model's alternative render as the same clickable chip opening the same Monaco view, so the
+user gets an equally good answer either way. That is the argument for widening: `cited` is a
+proxy for "the user got a clickable link to code that answers the question", and both
+satisfy it.
 
-**What it is:** after login, the server needs a way to recognize "this request came
-from the same browser that just logged in" — HTTP itself has no memory between
-requests. The fix: the server puts a small dict (just `{"user_id": "<uuid>"}`) in a
-cookie, and *signs* it with a secret (`session_secret`) so the browser can hold it and
-send it back, but can't tamper with it undetected.
+### A27. A single 884,000-character line blew past the model's request limit
 
-**Signed, not encrypted — the distinction matters:** signing proves the cookie wasn't
-edited (any change breaks the signature check); it does *not* hide the contents from
-the browser. That's fine here because `user_id` isn't sensitive — you already know your
-own ID. Contrast with the GitHub access token (see Fernet entry above), which *is*
-encrypted, because that value must stay hidden even from the browser holding the
-session.
+**Problem:** on the requests repo one `read_file` call returned `ext/requests-logo.svg` —
+one line, 884k characters ≈ 220k tokens — and OpenAI rejected the request (429, "request
+too large"), killing the whole paid eval run. The 200-line cap didn't help: lines are not a
+safe unit when one line is a minified bundle or an inline SVG.
+**Why:** the cap was written thinking in source-file terms; search surfaced the SVG chunk
+because lexical matching doesn't care what a file is.
+**Name:** cap by bytes, not by lines; make paid runs resumable and per-item fault-tolerant.
+**How we solved it:** `read_file` now also caps at 12,000 characters and search snippets at
+160; the eval records a failed question instead of aborting, and its per-question JSONL
+checkpoint meant the restart re-used all 16 finished answers.
 
-**Why we need it here:** without it, every request would need to redo the full GitHub
-OAuth flow to prove identity. The signed cookie is the "remember me" mechanism between
-login and logout.
+### A28. The eval saturated, so M8 could not be measured against it
 
-**How it's used in Noetra:**
-- `SessionMiddleware` is registered in `backend/api/main.py` with
-  `secret_key=settings.session_secret`.
-- `auth.py`'s callback handler sets `request.session["user_id"] = str(user.id)` after a
-  successful GitHub login.
-- `get_current_user` (a FastAPI dependency) reads `request.session["user_id"]` back out
-  on every subsequent request, loads the matching `User` row from Postgres, and 401s if
-  it's missing.
-- Logout is just `request.session.clear()`.
+**Problem:** `BUILD_ORDER.md` specified M8 as "build the call graph, then measure it on the
+M7 agent eval with the tools on vs. off". That eval sat at `cited` 0.91 over 46 questions,
+and A26 had already established three of the four misses were narrow answer keys rather than
+retrieval failures. Real headroom: roughly one question. Any tools-on/off delta would have
+been indistinguishable from run-to-run model variance — the feature would have shipped
+unmeasured, which is the exact failure the "graph ships after the agent" ordering (B20)
+existed to prevent.
+**Why:** a benchmark only measures what it contains. All 46 questions were `symbol`,
+`keyword`, `conceptual` or `docs` — shapes that `code_search` plus `read_file` already
+resolve in two or three calls. Not one of them asked for a *set* of locations, which is the
+only thing a call graph does better than search. The feature and the benchmark were testing
+different capabilities, so the benchmark was guaranteed to report nothing.
+**Name:** benchmark saturation / ceiling effect. Goodhart-adjacent: the number had stopped
+tracking the thing it was a proxy for.
+**Fix:** build the measurement before the feature. A fifth question kind, `graph` — 12
+enumeration questions ("every caller of X"; "what does Y invoke, and where is each defined")
+whose answer keys list *every* correct location — then score the existing three-tool agent on
+it to pin a baseline (`ccov` 0.63) before writing any extraction code. Only then was the tool
+worth building. The original 46 were demoted from target to no-regression guard, and are
+excluded from `eval.run` so the pinned 0.85/0.91 retrieval baseline stays comparable.
+**Transferable version:** when a new feature scores flat on an existing benchmark, first ask
+whether the benchmark can express the capability at all. A saturated metric doesn't say the
+feature is worthless; it says the metric is finished.
 
-**Is this standard?** Yes — this is the standard signed-cookie session pattern, the
-same family of idea as JWTs (also signed-not-encrypted) just a different format/library.
-Common in small-to-mid apps that don't need a server-side session store (Redis, DB
-table) — the cookie itself carries the state.
+### A29. A boolean "cited" scored a half-right answer as a win
 
-**Docs:** [Starlette SessionMiddleware](https://www.starlette.io/middleware/#sessionmiddleware) · [itsdangerous](https://itsdangerous.palletsprojects.com/)
+**Problem:** the first graph-bucket run scored `cited` 0.92 — statistically identical to the
+saturated 46 — which read as "the current agent already handles these". It did not. Answers
+were naming two of five call sites and being recorded as correct.
+**Why:** `cited` asks "does any verified citation overlap any answer location?". That is the
+right question when a key holds one location, which every question until now did. For an
+enumeration answer it is the wrong question: partial and complete answers are both `True`,
+and the metric has no way to tell "found one caller" from "found all five".
+**Name:** metric/task mismatch — the measure lost resolution exactly where the new capability
+lived. The same shape as reporting accuracy on a multi-label problem.
+**Fix:** added coverage (`rcov` / `ccov`) — the share of the *whole* answer key reached and
+cited — **alongside** the booleans rather than replacing them, so every historical number
+stays comparable. For a single-location key coverage is arithmetically identical to the
+boolean, which also means old checkpoints backfill exactly rather than approximately. The
+honest reading of that first run was `ccov` 0.63, and the report now prints a "cited but
+incomplete" section listing every answer the boolean flatters. Five of twelve were in it.
 
----
+### A30. A downstream feature exposed a two-session-old misdiagnosis
 
-## Docker Compose service networking (why `db` resolves in a container but not on the host)
+**Problem:** zod resolved **3 import edges for 1,411 entities**. This was noticed twice in
+earlier sessions and both times attributed to "monorepo `@zod/*` alias/bare imports, expected,
+not a bug". Building the call graph made it load-bearing — the middle confidence tier is
+"defined in a file this one imports" — and the zod graph question scored 0/4.
+**Why:** the recorded diagnosis was never checked. The real cause is that TypeScript under
+`moduleResolution: NodeNext` requires importing the **emitted** path: source in `util.ts` is
+imported as `"./util.js"`. Our resolver took the specifier literally, looked for `util.js`,
+then `util.js.ts`, and resolved nothing. Nothing to do with monorepo aliases.
+**Name:** an unverified diagnosis hardening into documentation; a *silent* data-quality
+failure — the pipeline reported success while producing almost no edges.
+**Fix:** strip a JS output extension (`.js/.jsx/.mjs/.cjs`) and retry against the source
+extensions, with the literal path still winning when it exists. zod went **3 → 405 import
+edges**, call edges 675 → 1,324, and its confidence mix inverted (0.85 tier 0 → 786; the
+weak 0.7 tier 173 → 36). The zod graph question went 0/4 → 4/4. This had been silently
+degrading `list_dependencies` and the repo map's PageRank for every TypeScript repo since M4,
+not just the call graph.
+**Transferable version:** a "known limitation" with no measurement behind it is a guess. The
+tell was the number itself — 3 edges for 1,411 entities is not a limitation, it is a broken
+component, and the ratio said so from the start.
 
-**What it is:** Docker Compose puts all services (`db`, `redis`, `api`, `worker`) on a
-private virtual network and gives each one a DNS nickname equal to its service name in
-`docker-compose.yml`. Any container on that network can reach Postgres by just saying
-`db`, the same way you'd normally need an IP address or `localhost`.
+### A31. The reference-weighted repo map: volume is not importance
 
-**Why it matters here:** `.env`'s `DATABASE_URL` is `postgresql+psycopg://noetra:noetra@db:5432/noetra`
-— that `db` only resolves *inside* the Docker network. Running `alembic upgrade head`
-directly on Windows (outside any container) fails immediately, because the host has no
-idea what `db` means. That's why every DB/Celery management command in this project runs
-via `docker compose exec <service> ...` — the command executes *from inside* a container
-that's already on the network, so the nickname resolves.
-
-**Is this standard?** Yes — this is how every multi-container Compose (or Kubernetes)
-setup works; service discovery by name instead of hardcoded IPs is the whole point of
-container networking.
-
-**Docs:** [Compose networking](https://docs.docker.com/compose/how-tos/networking/)
-
----
-
-## SQLAlchemy `Base.metadata` registration + Alembic autogenerate
-
-**The confusion:** `migrations/env.py` has a line `from core import models  # noqa: F401`
-that's never referenced again — looks like dead code, but deleting it silently breaks
-migrations.
-
-**What's actually happening:** every model class (`User`, `Repository`) registers itself
-into a shared registry (`Base.metadata`) purely as a side effect of its class body being
-*executed* — i.e., of the file being imported. `core/db.py` (which defines `Base`) never
-imports `models.py`, so nothing forces that registration to happen — unless something
-else explicitly imports it. That's the whole job of that one line in `env.py`: force
-Python to read `models.py` so both classes register themselves before Alembic compares
-"what's in Postgres right now" against "what `Base.metadata` says should exist" and
-generates a migration for the difference.
-
-**Consequence of removing it:** `Base.metadata` would be empty when alembic runs, so
-`--autogenerate` would see zero expected tables and generate a migration that **drops**
-every real table — because as far as that process can tell, none of them should exist.
-
-**Is this standard?** Yes — "import your models somewhere alembic's `env.py` can see
-them" is the standard SQLAlchemy + Alembic setup; nothing custom to Noetra.
-
-**Docs:** [Alembic autogenerate](https://alembic.sqlalchemy.org/en/latest/autogenerate.html)
-
----
-
-## Celery producer/consumer split — `send_task` by name vs. importing the task
-
-**What it is:** a Celery *producer* (code that enqueues work) doesn't need the actual
-task function — just the broker connection and the task's registered *name* (a string).
-`celery_app.send_task("worker.tasks.clone_repository", args=[...])` publishes a message
-to Redis without ever importing `worker.tasks`. Only the *consumer* (the `worker`
-process, which actually runs `@celery_app.task`-decorated functions) needs the real
-implementation.
-
-**Why it matters here:** `api/repos.py` needs to enqueue the clone job, but CLAUDE.md's
-module boundary says `api` should never import `worker` (that's where all the slow,
-repo-touching logic is supposed to live, isolated from the HTTP layer). `send_task` by
-name is what makes that boundary possible — `api` only needs to agree on a task *name*
-with `worker`, not share code with it. Proven this session: enqueueing a task that
-didn't exist yet still worked (message published, worker received it, only rejected it
-because the name wasn't registered on *its* side) — clean confirmation the two sides are
-decoupled.
-
-**Is this standard?** Yes — this is the standard way to keep a web API and a background
-worker in separate deployable processes/images while still coordinating work between
-them.
-
-**Docs:** [Celery: calling tasks](https://docs.celeryq.dev/en/stable/userguide/calling.html)
-
----
-
-## Git credential injection via `http.extraHeader` (vs. credentials-in-URL)
-
-**The naive way:** `git clone https://{token}@github.com/owner/repo.git` — works, but
-`git` writes that URL (token included) straight into the cloned repo's `.git/config` in
-plaintext. Anything that can read the repo's files afterward can read a live GitHub
-token.
-
-**The better way:** pass the token as a one-off HTTP auth header via a `-c` flag, which
-applies only to that single command and is never persisted to disk:
-`git -c http.extraHeader="AUTHORIZATION: basic {base64(x-access-token:{token})}" clone https://github.com/owner/repo.git`
-
-**Why we need it here:** every clone in Noetra will be authenticated with the owning
-user's real GitHub OAuth token (see the `is_private`-field decision in the 2026-07-21
-session log entry — auth is unconditional, not just for private repos), so avoiding
-token leakage into the cloned repo's own config file matters for every single import,
-not just private ones.
-
-**Is this standard?** Yes — this is the same mechanism GitHub's own `actions/checkout`
-action uses internally to authenticate clones in CI without leaving a token behind in
-the checked-out repo.
-
-**Docs:** [git-config: `http.extraHeader`](https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpextraHeader)
-
----
-
-## Correction: `git clone -c ...` is *not* purely process-local
-
-**The earlier claim (now known wrong):** the entry above says a `-c` flag "applies only to that single command and is never persisted to disk." That's true for most git commands, but **not** for `git clone`. Verified by hand this session: after `git clone -c http.extraHeader="Authorization: Basic ..." <url> dest`, `cat dest/.git/config` showed the header sitting right there under `[http]` — same leak as putting the token in the URL, just reached a different way.
-
-**Why `git clone` is special:** cloning has to persist *some* settings into the new repo's config anyway (the remote URL, the default branch tracking) so future `git fetch`/`git pull` work without re-specifying everything. Git's implementation carries certain `-c` overrides — including `http.*` ones — into that same saved config, on the assumption you'd want later fetches to keep using the same settings. Reasonable default for e.g. `http.postBuffer`, actively dangerous for a bearer credential.
-
-**The real fix:** treat the clone as producing a config that needs a cleanup pass — run `git config --unset-all http.extraHeader` inside the destination immediately after a successful clone. The token still never touches the clone *URL* (so it's never in shell history / process argv longer than necessary) and now never survives on disk past the clone step either.
-
-**Lesson generalized:** "`-c` is a one-off override" is a per-*command* guarantee, not a blanket git guarantee — worth verifying empirically (`cat .git/config` after the fact) rather than trusting the general rule for a specific command you haven't checked.
-
-**Docs:** [git-clone docs](https://git-scm.com/docs/git-clone) (see the note on `-c`/`--config` under OPTIONS)
+**Problem:** the plan called for feeding call edges into the repo map's PageRank instead of
+only import edges — aider's actual design, and free once `reference_edge` existed. Built,
+measured, and **reverted**: graph-bucket `ccov` 0.84 → 0.72, the other 46 `cited` 0.89 → 0.87.
+No bucket improved.
+**Why:** import edges and call edges measure different things. An import edge is emitted once
+per file pair, so it counts **breadth** — how many distinct parts of the system depend on
+this. A call edge is emitted once per call site, so it counts **volume** — how many times it
+is invoked. A logging helper called 200 times from 2 files scores enormously on volume and
+almost nothing on breadth; a session module called 20 times from 15 files is the reverse. For
+*orientation* — which is the map's entire job — breadth is the better proxy, because plumbing
+is where control passes through, not where answers live. The visible symptom: on `requests`,
+`tests/testserver/server.py` (many calls, few callers) jumped #18 → #9, and since the map is
+capped at 1,500 tokens, promoting it **evicted a real source file** from the list.
+**Name:** proxy-metric mismatch — optimising a ranking signal that correlates with the wrong
+property. Related: the map had little headroom to begin with (A25 showed its value is
+behavioural — keeping the model in "look it up" mode — not the precision of its top ten).
+**Fix:** reverted to import-only ranking. Recorded, not deleted: the plausible repair is
+excluding call edges that originate in test files, and the reason aider gets away with volume
+weighting is that it runs **personalised** PageRank biased toward the files already in the
+chat, re-ranked per request. Our map is built once per repo and shared by every question, so
+it has no such correction — a design difference that was glossed over when borrowing the idea.
+**Transferable version:** "free signal, why not add it" is not a reason. This cost one eval
+run to find out, which is cheap; shipping it would have quietly degraded every question.
 
 ---
 
-## GitHub has two different auth surfaces: REST API (`Bearer`) vs. git-over-HTTPS (`Basic`)
-
-**The mistake:** authenticated `git clone` with `-c http.extraHeader="Authorization: Bearer <token>"` — reasonable guess, since `Bearer` is what `core/github.py` already uses successfully against `https://api.github.com`. It failed with `fatal: could not read Username for 'https://github.com'`, as if no credentials had been sent at all.
-
-**What's actually going on:** `github.com`'s REST/GraphQL API and its git wire-protocol server (the thing `git clone`/`fetch`/`push` actually talk to) are different pieces of infrastructure with different, unrelated auth conventions. The git server predates the `Bearer` scheme's use here and only recognizes standard **HTTP Basic Authentication** — the same mechanism you'd get "for free" by embedding credentials in the clone URL (`https://<token>@github.com/...`); git converts that into a Basic header internally before sending it. A `Bearer` header is simply not a scheme the git server checks for, so it behaves as if the request were anonymous.
-
-**How it's used in Noetra:** `worker/tasks.py` builds `Authorization: Basic <base64("x-access-token:" + token)>` for the clone specifically, while `core/github.py` keeps using `Authorization: Bearer <token>` for REST calls (`/user`) — same token, two different header formats, because the two servers being called expect different things.
-
-**Is this standard?** Yes — this is a real, commonly-hit GitHub gotcha, not a Noetra-specific quirk. It's the same reason `git`'s own credential helpers and CI tools (e.g. `actions/checkout`) always construct Basic auth for clone operations regardless of what a REST client would use.
-
-**Docs:** [Git Book — Basic Authentication over Smart HTTP](https://git-scm.com/book/en/v2/Git-on-the-Server-Smart-HTTP)
-
----
-
-## `sys.path` isn't the same for every way of starting Python
-
-**The confusion:** the `api` service could already `import core` and `import api` just fine (via `uv run uvicorn api.main:app`), so it seemed safe to assume the `worker` service (`uv run celery -A core.celery_app worker`) could too. It couldn't — it crashed on startup with `ModuleNotFoundError: No module named 'worker'`, despite the exact same working directory (`/backend`) and the exact same file actually being present on disk.
-
-**What's actually going on:** Python decides what folders are importable (`sys.path`) partly based on *how* the process was started, not just the working directory. Running `python -c "..."` (or `python -m x`) auto-adds the current directory. But both `uvicorn` and `celery` here are started as **installed console-script entry points** (`.venv/bin/uvicorn`, `.venv/bin/celery`), and by default that does *not* add the working directory. `uvicorn` happens to special-case this — it explicitly inserts the cwd into `sys.path` itself when resolving a dotted app string like `api.main:app`, as a deliberate convenience feature. `celery` has no equivalent special-casing for its `autodiscover_tasks(["worker"])` call, so it just failed the plain `import worker`.
-
-**The fix:** don't rely on one tool's incidental convenience behavior — set `PYTHONPATH=/backend` explicitly as an environment variable on both services in `docker-compose.yml`, so importability doesn't depend on which CLI tool happens to be generous about it.
-
-**Is this standard?** Yes — `PYTHONPATH` is the standard, explicit way to guarantee a directory is importable regardless of entry point; relying on a specific tool's internal convenience logic (as the `api` service was doing, unknowingly) is fragile precisely because it isn't documented behavior you can count on from every tool.
-
-**Docs:** [Python docs — `sys.path` initialization](https://docs.python.org/3/library/sys.path_init.html)
-
----
-
-## App logout vs. IdP logout (federated / RP-initiated logout)
-
-**The question that came up:** after clicking "log out" in Noetra, then "log in" again in the same browser, GitHub skipped straight past its login/consent screen and logged the user right back in. Shouldn't logout have logged them out of GitHub too?
-
-**The distinction:** GitHub here is the **identity provider (IdP)** — the party that actually verifies who you are. Noetra is the **relying party (RP)** — it just trusts GitHub's answer. `request.session.clear()` (Noetra's logout) only ends the *local* session between the browser and Noetra. It has no effect on the browser's separate github.com login cookie, or on GitHub's record that you already consented to the "Noetra" OAuth app's scopes — both of those live entirely on GitHub's side.
-
-**Why this is correct, not a bug:** if logging out of one small app also logged you out of github.com (and by extension every other app using "Sign in with GitHub" in that browser), that would be surprising and disruptive — the same reason logging out of a random site doesn't log you out of Gmail after "Sign in with Google." Local logout and IdP logout are supposed to be independent.
-
-**Why there's no way to force it here:** plain OAuth 2.0 (what GitHub implements) is only an authorization protocol — it has no "logout" concept at all. **OpenID Connect** (an identity layer built on top of OAuth) adds an optional `end_session_endpoint` for exactly this, called RP-initiated logout / federated sign-out — but GitHub doesn't implement OIDC, so no such endpoint exists to call.
-
-**The closest available thing (different, not equivalent):** GitHub does expose `DELETE /applications/{client_id}/token` to revoke the OAuth app's access token. That forces the consent screen to reappear next login (since access was revoked) — but it still doesn't touch the github.com session itself, and Noetra doesn't currently call it (would mean re-consenting on every login, not worth it for V1).
-
-**Is this standard?** Yes — this is how essentially every "Sign in with X" integration behaves (Google, Facebook, GitHub, etc.).
-
-**Docs:** [GitHub OAuth Apps — scopes & token revocation](https://docs.github.com/en/rest/apps/oauth-applications) · [OpenID Connect RP-Initiated Logout](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)
-
----
-
-## IDOR (Insecure Direct Object Reference) and the 404-vs-403 trick
-
-**What it is:** a very common web vulnerability class where an endpoint looks up a
-resource by an ID from the request (`/repos/{id}/files`) without checking whether the
-*current user* is actually allowed to see that ID. If the check is missing, any logged-in
-user can read any other user's data just by changing the ID in the URL/request.
-
-**Why we need it here:** `GET /repos/{id}/files` needs to return one user's repo data,
-never another user's, even though both are just rows in the same `repositories` table
-identified by UUID.
-
-**How it's used in Noetra:** `_get_owned_repository()` (`backend/api/repos.py`) folds the
-ownership check directly into the DB query — `WHERE id = :id AND user_id = :current_user`
-— instead of "look up by id, then separately check the owner." If no row matches either
-condition, it raises **404**, not 403. This is deliberate: a 403 ("forbidden") would leak
-that the ID *exists*, just isn't yours — letting an attacker map out valid IDs even
-without reading their contents. 404 makes "doesn't exist" and "exists but isn't yours"
-look identical from the outside (GitHub itself does the same thing for private repos).
-
-**Is this standard?** Yes — enforcing authorization inside the query itself (not as a
-separate check after fetching) is the standard fix for IDOR, and "404 over 403" for
-ownership failures is a known, deliberate pattern, not just a Noetra choice.
-
-**Docs:** [OWASP: Insecure Direct Object References](https://owasp.org/www-community/attacks/Insecure_Direct_Object_Reference)
-
----
-
-## The client is never a trust boundary
-
-**The question that came up:** if the React UI never renders a button to fetch *another*
-user's repo, why does the API still need to check ownership on every request?
-
-**The answer:** the frontend and backend are two separate programs connected only by
-HTTP. The React app is just *one* possible caller of the API — nothing stops a request
-from being sent a different way: editing a request in the browser's Network tab and
-resending it, hitting the API directly with `curl`/Postman using a valid session cookie,
-or scripting a loop over IDs. A session cookie proves *who's asking*, not *what they're
-allowed to ask for* — that has to be re-checked by the server on every single request,
-regardless of what the UI happens to expose. Relying on "the button doesn't exist" as
-protection is called **security through obscurity**, and it's how most real IDOR bugs are
-actually found in practice — not through the app's own UI, but by directly editing a
-request the UI sent and seeing what comes back.
-
-**Is this standard?** Yes — "never trust the client" is one of the most repeated rules in
-web security; any check that matters for security has to live server-side.
-
-**Docs:** [OWASP: Insecure Direct Object References](https://owasp.org/www-community/attacks/Insecure_Direct_Object_Reference) (same root cause as the entry above)
-
----
-
-## Real-world files break "every tracked path is a normal readable file"
-
-**The pattern:** building the file tree browser, `git ls-files` was assumed to yield a
-flat list of ordinary text/binary files. Two different real repos (not toy test repos)
-broke that assumption in two different ways:
-
-1. **NUL bytes aren't "binary" by the usual test.** The usual binary-detection trick —
-   "try to `.decode('utf-8')`, if it throws, it's binary" — misses NUL bytes (`\x00`),
-   because NUL is technically a *valid* UTF-8 character. A file can decode successfully
-   and still contain NUL bytes, which Postgres `text` columns reject outright. Fix: check
-   for `\x00` in the raw bytes *before* trying to decode, not after.
-2. **Symlinks aren't files.** `git ls-files` lists tracked symlinks the same as regular
-   files, but a symlink's actual git-tracked content is the *target path string itself*
-   (e.g. `"../../../arch/arc/boot/dts"`), not the thing it points to. Reading it the
-   normal way either silently reads through the link, or — if the target is a directory
-   (real example: the Linux kernel's `scripts/dtc/include-prefixes/arc`) — crashes with
-   `IsADirectoryError`. Fix: check `Path.is_symlink()` first and read the link target via
-   `Path.readlink()`, which matches what git itself considers that path's content to be.
-
-**Why this matters generally:** code that only gets tested against small/simple repos
-will look correct and then fail the first time it meets a large, old, real-world codebase
-— these two bugs only ever showed up when testing against `fbsamples/f8app` and the Linux
-kernel, never against small test repos like `octocat/Hello-World`.
-
-**Docs:** [git-ls-files](https://git-scm.com/docs/git-ls-files) · [Python `pathlib.Path.readlink`](https://docs.python.org/3/library/pathlib.html#pathlib.Path.readlink)
-
----
-
-## A caught exception's own string can leak a secret
-
-**The gotcha:** adding a timeout to `git clone` meant catching `subprocess.TimeoutExpired`
-— but that exception's default `str()` representation includes the **full command list**
-that was run, argv and all. Here, that command list contained the Basic-auth header with
-a live GitHub token embedded in it (`Authorization: Basic <base64 token>`). Blindly doing
-`repo.error_message = str(exc)` (the generic pattern used for every other unexpected
-failure in this task) would have written that token straight into the database, visible
-to the user through a plain error message.
-
-**The fix:** catch `TimeoutExpired` in its own `except` block, *before* the generic
-`except Exception`, and hand-write a safe message (`f"Clone timed out after {N}s"`)
-instead of using the exception's own string form.
-
-**Why this matters generally:** "just log/store `str(exc)`" is a very common pattern for
-unexpected errors, and it's usually safe — but any exception whose message can include
-data you passed in (command arguments, request bodies, headers) needs to be checked for
-what it might be carrying before it's ever surfaced to a user or written to a log/DB.
-
-**Is this standard?** Yes — this is a known category of accidental secret leakage (secrets
-ending up in logs/error messages), commonly caught in security reviews of exactly this
-kind of "wrap risky operation in try/except, store the error" code.
-
-**Docs:** [Python docs — `subprocess.TimeoutExpired`](https://docs.python.org/3/library/subprocess.html#subprocess.TimeoutExpired)
-
----
-
-## Redis's two Celery roles: broker vs. result backend
-
-**What it is:** `core/celery_app.py` configures Redis twice — once as `broker`, once as
-`backend`. These are two different jobs, easy to conflate because it's the same Redis
-instance doing both.
-
-- **Broker** = the message queue. When `api` calls `celery_app.send_task(...)`, that
-  pushes a message onto a Redis list; workers block waiting to pop messages off it. This
-  is the part actually load-bearing in Noetra — it's how `api` hands work to `worker`.
-- **Result backend** = where Celery *would* store a task's return value/status, keyed by
-  task ID, if something called `AsyncResult(task_id).get()` to check on it later.
-
-**Why this matters here:** Noetra doesn't use the result-backend half at all — nothing
-calls `AsyncResult`. Task/indexing status is tracked a different way: `Repository.status`
-in Postgres, updated directly by the worker as it progresses (`queued → cloning → ...`).
-That's deliberate, not an oversight — the indexing pipeline is multiple separate Celery
-tasks, not one task with one "final result," and the status needs to be queryable
-(joined to `owner_id` for ownership checks) in a way a Redis key-by-task-id can't do.
-
-**Is this standard?** Yes — using Celery purely as a task queue (broker) while tracking
-your own domain-level status in your real database is a common pattern once a job's
-progress needs to be more than "did it return a value."
-
-**Docs:** [Celery: Result Backends](https://docs.celeryq.dev/en/stable/userguide/configuration.html#task-result-backend-settings)
-
----
-
-## Distributed locks with Redis (`SET key val NX EX ttl`)
-
-**What it is:** a way to make sure only one process, across multiple separate
-containers/servers, can do a particular thing at a time — the multi-process equivalent
-of a `threading.Lock()`, except a normal Python lock only works within one process's
-memory, and `api`/`worker` here are separate processes entirely.
-
-**The building block:** Redis's `SET` command with two flags combined:
-- `NX` ("Not eXists") — only set the key if it doesn't already exist. This is what makes
-  it a lock: if two requests race to `SET` the same key at the same instant, Redis
-  guarantees only one of them gets to actually create it (atomic check-and-set, done as
-  one command — no separate "check, then act" steps that could race against each other).
-- `EX <seconds>` — auto-delete the key after N seconds, no matter what. Called a
-  **lease** rather than a plain lock, because it self-expires. This exists purely as a
-  crash safety net: if the process holding the lock dies before it can release the lock
-  itself, the lock doesn't get stuck forever — Redis cleans it up on its own.
-
-**Why we need it here:** `api/repos.py`'s `retry_repository` had a real race — two rapid
-clicks on "Retry" could both see `status == FAILED`, both re-enqueue
-`worker.tasks.clone_repository` for the same repo, and both start deleting/re-cloning
-the same on-disk directory concurrently. `core/redis_client.py`'s
-`acquire_index_lock`/`release_index_lock` close that: the API tries to acquire a
-per-repo lock (`lock:index:{repository_id}`) before enqueueing, and the worker releases
-it in a `finally` block once the job ends (success or failure) — so a second concurrent
-attempt gets `False` back and returns a 409 instead of racing.
-
-**Why Redis specifically (not Postgres, not a Python variable):** needs to be (1) shared
-across separate `api`/`worker` processes — a Python-level lock wouldn't be visible across
-containers, (2) atomic in one round trip — the `NX`+`EX` combo does "check, set, and
-expire" as a single indivisible operation, and (3) self-cleaning — Redis's `EX` gives
-automatic expiry for free; doing the equivalent in Postgres would mean writing and
-running your own cleanup job for stale lock rows.
-
-**A known sharp edge (not yet built — no need to yet):** if a task ever ran *longer*
-than the lock's TTL, the lock could auto-expire while the task is still legitimately
-running, a second process could then acquire a new lock, and the first task's eventual
-`release` would delete that *second* process's lock instead of its own — called **lock
-stealing**. The standard fix is a **fencing token**: store a unique value per acquire
-(not a constant like `"1"`) and only delete on release if the stored value still matches
-your own token (needs a small Lua script to stay atomic). Not implemented here because
-it's only reachable once a task can outlive the TTL, which can't happen yet — clone jobs
-are hard-capped at 300s (`CLONE_TIMEOUT_SECONDS`) against a 600s lock TTL.
-
-**Is this standard?** Yes — `SET NX EX` is the standard simple single-node Redis lock
-pattern. The full "Redlock" algorithm (locking across *multiple independent* Redis
-nodes) is a different, heavier tool for a different problem (Redis node failover), not
-needed here with a single Redis instance.
-
-**Docs:** [Redis `SET` command](https://redis.io/docs/latest/commands/set/) · [Redis distributed locks pattern](https://redis.io/docs/latest/develop/use/patterns/distributed-locks/)
-
----
-
-## RAG vs CAG (cache-augmented generation)
-
-**What they are:** two ways to get a codebase in front of an LLM.
-- **RAG** (retrieval-augmented generation): search the codebase, pull back the ~10 most
-  relevant snippets, put only those in the prompt.
-- **CAG** (cache-augmented generation): skip searching entirely — put the *whole* codebase
-  in the prompt and rely on **prompt caching** so you only pay full price for it once.
-
-**Why prompt caching makes CAG thinkable at all:** providers will cache a long prompt
-*prefix*. Send the same first 500k tokens again within the cache window and they're billed
-at a steep discount instead of full price. So "just include everything" stops being
-obviously insane — with 1M-token context windows it's a real architecture, not a toy.
-
-**Why Noetra uses RAG anyway** — three reasons, in increasing order of how much they hurt:
-1. **Size.** ~1M tokens is roughly 3.5MB, roughly 100k LOC. Plenty of real repos are
-   10–30x that.
-2. **Cost per question.** A cached read of a full repo is roughly 10x what a focused
-   ~15k-token RAG context costs, on every single question.
-3. **Cache TTL — the actual killer.** Caches expire in minutes to an hour. That's fine for
-   one person hammering one repo in one sitting. Noetra is many users x many repos, each
-   queried occasionally, so nearly every question would pay the expensive *cache write*
-   again. CAG's economics assume warmth that a multi-tenant app cannot maintain.
-
-Plus citations get worse: with CAG the model reports line numbers from memory of a huge
-blob and drifts; with RAG the retriever already knows the exact line range.
-
-**How it's used in Noetra:** RAG (see `docs/RETRIEVAL.md`), but two ideas are borrowed
-from CAG — (a) keep the prompt prefix byte-stable (system prompt, then tool definitions,
-then repo map, and never a timestamp or the user's question early in it) so automatic
-prefix caching hits on every follow-up question; (b) a "small repo fits entirely in the
-prompt" fast path is noted as a clean V2 seam.
-
-**Is this standard?** RAG is the default for codebase QA. CAG is newer and genuinely used
-— for single-user tools on bounded corpora. The trade-off is well known: CAG buys
-simplicity and zero index-build time, and pays for it in per-query cost and corpus size.
-
-**Update (provider swap → Gemini):** the borrowed idea still holds, but the mechanism has a
-caveat worth knowing. Gemini 2.5 Flash does **implicit caching** — automatic, no API change,
-you just get a discount when a request shares a prefix with a recent one. Unlike OpenAI's,
-it only kicks in **above a minimum prompt length** (order of ~1k tokens), so a short prefix
-gets cached-nothing rather than a small win. That's an argument *for* a substantial repo map
-in the prefix, not against one. There is also **explicit caching** (you create a cache
-object and reference it) if implicit ever proves too unreliable to depend on.
-
-**Docs:** [Gemini context caching](https://ai.google.dev/gemini-api/docs/caching) ·
-[OpenAI prompt caching](https://platform.openai.com/docs/guides/prompt-caching) (the
-original reference for this entry)
-
----
-
-## Why lexical search still beats embeddings on code
-
-**The intuition to unlearn:** "semantic search understands meaning, so it must be better
-than keyword matching." True for prose. Much weaker for code.
-
-**Why code is different:** code is not natural language — it is mostly *identifiers*, and
-the thing you are looking for is usually spelled out literally somewhere in the file. Ask
-"where is `createToken` defined?" and a plain text index nails it instantly. An embedding
-model has to represent `createToken` as a fuzzy point in vector space and hope the right
-chunk lands nearby. Exact matching wins whenever an exact match exists.
-
-Embeddings earn their keep on exactly one class of question: where the user's words appear
-*nowhere* in the codebase — "how does authentication work?" against a file that only ever
-says `Session`, `verify`, `cookie`. That is a real and important class. It is also a
-minority of questions.
-
-**How it's used in Noetra:** this is why the build order puts lexical retrieval in
-milestone 4 and embeddings in milestone 7 — and why they get fused rather than picking
-one. A structural retriever (trigram lookup over `code_entity`) also shipped briefly in
-M5, then got cut: an ablation against the eval set showed it moved recall@5 by only +0.04,
-concentrated in one edge case (identifiers with characters the text-search tokenizer
-mangles) — everywhere else, lexical alone already found the same chunk, because chunking
-is AST-aware so a function's own definition line is usually its highest-signal chunk
-anyway. This is also why a query that looks like a bare identifier gets routed straight to
-lexical's exact-match path with no embedding API call at all (~10 ms instead of ~100 ms,
-for a *better* answer).
-
-**Is this standard?** Increasingly yes — "agentic search" (give the model `grep` plus
-`read_file` plus symbol lookup and let it explore) has become a mainstream alternative to
-vector-first RAG for code specifically. Claude Code itself ships with no vector index.
-
----
-
-## Postgres full-text search: `tsvector`, GIN, and generated columns
-
-**What it is:** Postgres can do real text search natively — no Elasticsearch needed.
-- `to_tsvector('english', text)` turns a document into a **`tsvector`**: a normalized bag
-  of searchable words (lowercased, stemmed so "running" becomes "run", stopwords dropped).
-- A **GIN index** (Generalized Inverted Index) over that column makes matching fast. It is
-  an *inverted* index: instead of row to words, it stores word to list of rows containing
-  it, which is exactly the lookup a search query needs.
-- **`pg_trgm`** is a separate extension for *fuzzy/substring* matching (breaks text into
-  3-character chunks). Useful for partial identifier matches where stemming does not help.
-
-**Generated column — the part that matters here:** rather than computing the `tsvector` in
-application code and remembering to update it, declare it as a `GENERATED ALWAYS AS
-(to_tsvector('english', coalesce(content, ''))) STORED` column. Postgres recomputes it
-automatically on every insert and update. There is no indexing step to run, no background
-job, and no way for the index to drift out of sync with the content.
-
-**Why we need it here:** it is what makes the revised build order possible. `File.content`
-is already persisted at clone time, so adding this column is *one migration and zero
-pipeline cost* — full-text search over the entire repo works the moment cloning finishes,
-long before parsing or embedding exist. That is enough retrieval to build the agent, the
-citation UI, and the eval harness against.
-
-**How it's used in Noetra:** `file.content_tsv` (see `docs/DATA_MODEL.md`), queried by the
-lexical retriever in `core/retrieval`. `pg_trgm` on `code_entity.name` for fuzzy symbol
-lookup.
-
-**Is this standard?** Yes, for anything short of dedicated-search-engine scale. Reaching
-for Elasticsearch before outgrowing Postgres FTS is a classic premature-infrastructure
-mistake — it is a whole second datastore to run, sync, and keep consistent.
-
-**Docs:** [Postgres full-text search](https://www.postgresql.org/docs/current/textsearch.html) · [generated columns](https://www.postgresql.org/docs/current/ddl-generated-columns.html) · [pg_trgm](https://www.postgresql.org/docs/current/pgtrgm.html)
-
----
-
-## Contextual retrieval (prefixing chunks before embedding)
-
-**The problem:** you chunk code by function so chunks do not split mid-function. But a
-function body on its own is often *ambiguous*. `def refresh(self, token: str)` — is that a
-cache, a session, an OAuth token, a UI component? The embedding model cannot tell, so the
-vector lands somewhere generic and the chunk never surfaces for "how does auth work?"
-
-**The fix:** before embedding, prepend the chunk's context — file path, enclosing class,
-signature:
-
-```
-src/auth/tokens.py > class TokenService > def refresh(self, token: str) -> Token
-<the actual chunk source>
-```
-
-Now the vector lands near "authentication" in embedding space, because the text says so.
-Embed the prefixed version; return the raw chunk to the model.
-
-**Why it's a good deal:** it is an f-string. No extra API calls, no schema change beyond
-storing what you embedded, no latency. It is the cheapest meaningful recall improvement
-available at that step.
-
-**How it's used in Noetra:** `chunk.embed_text` stores the prefixed version (so a re-embed
-is reproducible and you can see what the model actually saw); `chunk.content` stores the
-raw source that goes back to the LLM. See `docs/RETRIEVAL.md`, chunking rule.
-
-**Is this standard?** Yes — Anthropic named and popularized the technique as "contextual
-retrieval." The fuller version uses an LLM to write a sentence of context per chunk; the
-cheap version (deterministic path/class/signature prefix, what Noetra does) captures much
-of the benefit for none of the cost.
-
-**Docs:** [Anthropic — Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval)
-
----
-
-## Reranking, and why RRF is not enough on its own
-
-**Reciprocal Rank Fusion (RRF)** merges several ranked lists into one. Its trick is that it
-only looks at *positions*, never scores — so you can fuse a BM25 text score, a symbol-table
-hit, and a cosine similarity without any calibration between them. That is exactly why it
-is used: three retrievers, three incomparable score scales, one merged list, no tuning.
-
-**Its limitation follows from the same trick:** RRF has no idea what the query *means*. A
-result that landed at position 3 in the lexical list gets credit for being at position 3,
-whether or not it actually answers the question.
-
-**A reranker** is a model that does look at meaning: give it the query and a candidate, it
-scores how well that candidate answers *that specific query*. It is more accurate than
-embedding similarity because it reads the query and the document together, rather than
-comparing two vectors computed independently. It is also far too slow to run over the whole
-corpus — which is the point of the pipeline shape:
-
-```
-3 retrievers -> ~30 candidates (RRF, fast, meaning-blind)
-             -> ~8 results     (rerank, slow, meaning-aware)
-             -> the model
-```
-
-**Fuse wide, cut narrow.** Retrieval's job is to not *miss* the right file (recall);
-reranking's job is to make sure it is in the top few (precision). Answer quality depends
-far more on what is in the top 8 than what is in the top 30.
-
-**Why this also explains the eval metric:** Noetra scores retrieval with **recall@k**, not
-precision — because the reranker and then the LLM both get a chance to discard bad hits,
-but neither can recover a correct file that retrieval never surfaced at all.
-
-**Is this standard?** Yes — retrieve-then-rerank is the standard two-stage information
-retrieval architecture, long predating LLMs.
-
-**Docs:** [RRF paper (Cormack et al.)](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)
-
----
-
-## HNSW vs IVFFlat (pgvector index types)
-
-**The problem both solve:** finding the nearest vectors to a query vector by brute force
-means comparing against every row. Fine at 1,000 chunks, not at 500,000. Both index types
-are **ANN** — Approximate Nearest Neighbour — trading a little accuracy for a lot of speed.
-
-**IVFFlat** clusters the vectors into `lists` buckets up front, then at query time only
-searches the few buckets nearest the query. Downsides: it must be **trained** on existing
-data (so you have to load rows *before* building the index), and you have to pick a good
-`lists` count for your row count — get it wrong and recall or speed suffers.
-
-**HNSW** (Hierarchical Navigable Small World) builds a layered graph of vectors and walks
-it from coarse to fine, like zooming in on a map. No training step, no data required
-before building, better recall at the same speed. It costs more memory and is slower to
-build at very large row counts.
-
-**Why Noetra uses HNSW:** no training step and no tuning pass to get wrong, and V1 is
-nowhere near the scale where IVFFlat's faster build time matters. Fewer knobs, better
-recall.
-
-**Is this standard?** Yes — HNSW is the default recommendation for pgvector unless you are
-at a scale where build time or memory becomes the binding constraint.
-
-**Docs:** [pgvector indexing](https://github.com/pgvector/pgvector#indexing)
-
----
-
-## Correction: Noetra doesn't use HNSW after all (M6)
-
-**The earlier claim (now known wrong):** the entry above says "Why Noetra uses HNSW" as
-settled fact. When M6 actually built the semantic leg, that got reversed — **no ANN index
-at all, exact cosine search instead.**
-
-**Why the reversal:** the concepts above (IVFFlat vs. HNSW) are both about *which ANN index
-to use*, quietly assuming an ANN index is the right call at all. Two things made it not be,
-for Noetra specifically: search always filters `WHERE repository_id = X`, and pgvector's
-ANN indexes return their global top-k *before* that filter applies — a selective filter can
-silently return fewer rows than asked for (fixable in pgvector 0.8+ with
-`hnsw.iterative_scan`, but that's a version dependency and a query-time `SET LOCAL` to carry
-everywhere). And separately, the app's own per-file cap already forces a full sort over
-every matching chunk in the repo, so an ANN index would sit unused by the only query that
-ever reads `chunk.embedding`. At V1's scale (hundreds to a few thousand chunks per repo), an
-exact `<=>` scan is tens of milliseconds — faster to add than to actually need.
-
-**The general lesson, not just this case:** "which ANN index" is the wrong first question.
-The right one is *whether you're past the point where exact search stops being fast enough* —
-the **brute-force vs. ANN crossover**, roughly 10⁵ vectors per filter partition. Below that,
-exact search wins on both correctness and often latency; reaching for ANN before that point
-is the anti-pattern, not the sophisticated choice.
-
-**Docs:** `docs/DATA_MODEL.md`'s "No vector index in V1" note; the same pattern is also
-called out in `docs/RETRIEVAL.md`'s Decision 3.
-
----
-
-## Evaluating retrieval: `recall@k`
-
-**The problem it solves:** "the answers feel good" is not a measurement. Every retrieval
-change — contextual prefixes, reranking, adding embeddings at all — is a guess unless
-something says whether it helped.
-
-**What an eval set is:** a fixed list of questions with *known correct answer locations*.
-For Noetra, ~40 questions across 2–3 public repos **pinned to a commit SHA** (so the
-answers do not move under you):
-
-```yaml
-- q: "Where is the session cookie signed?"
-  repo: noetra-fixtures/flask-sample@a1b2c3d
-  answers:
-    - { path: "app/session.py", lines: [40, 68] }
-```
-
-**`recall@k`** is: of all the questions, what fraction had a correct location somewhere in
-the top `k` retrieved results. `recall@5` and `recall@20` are the two worth tracking.
-
-**Why recall and not precision:** precision asks "how much of what I returned was good?"
-Recall asks "did I find the right thing at all?" Downstream, the reranker and then the LLM
-both get to throw away bad results — but neither can recover a file retrieval never
-surfaced. A miss at the retrieval stage is unrecoverable; noise is not.
-
-**How it's used in Noetra:** a pytest that runs each question through `core/retrieval` and
-prints the numbers, cheap enough to run on every retrieval change. It is the reason
-embeddings are milestone 7 rather than 5 — the plan is to establish a lexical-only
-baseline, find which questions fail, then build semantic retrieval against that evidence
-with the tuning knobs set by measurement instead of intuition.
-
-**Is this standard?** Yes — recall@k, precision@k, MRR and nDCG are the standard IR
-metrics, and building a small labelled eval set before tuning a retrieval system is
-ordinary practice. It is also the most interview-legible artifact in the project:
-"lexical-only recall@5 was 0.61; AST-chunked embeddings took it to 0.84" beats
-"I integrated pgvector."
-
----
-
-## Tree-sitter: a parser engine + swappable grammars
-
-**What it is:** a parsing library (built by GitHub) that turns source code text into a
-**concrete syntax tree (CST)** — a tree where a function is a node containing a name
-node, a parameter-list node, a body node, etc., instead of just being characters in a
-string. The parsing *engine* is one package (`tree-sitter`); each language's grammar
-(the actual rules for what "a function looks like" in that language) ships as its own
-separate package (`tree-sitter-python`, `tree-sitter-javascript`, ...).
-
-**Why it beats a language-specific tool (like Python's `ast`):**
-1. **One API, many languages.** `ast.parse()` only understands Python. `indexer` needs
-   Python, JS, *and* TS behind one code path — Tree-sitter's `Parser`/`Node`/`Tree`
-   classes work identically no matter which grammar is loaded.
-2. **Error-tolerant.** It produces the best tree it can even around a syntax error
-   elsewhere in the file (a real concern across an entire real-world repo).
-
-**The trade-off:** Tree-sitter's tree is *syntactic* only — it knows "this is a call
-expression," not "this call resolves to that specific imported function." That's exactly
-why import *resolution* (mapping `.utils` to an actual file) had to be a separate step
-(`indexer/graph.py`) built on top of parsing's output, not part of parsing itself.
-
-**A gotcha worth remembering:** TypeScript and TSX (TS + embedded JSX) can't share one
-grammar the way JS and JSX can — TS generics (`<T>`) and JSX tags are ambiguous in a
-couple of spots. `tree-sitter-typescript` ships *two* separate compiled languages in one
-package (`language_typescript()` and `language_tsx()`) specifically because of this.
-
-**How it's used in Noetra:** `indexer/parser.py` — one `Parser` instance per file
-extension, all built from this one library. Confirmed the exact node/field names
-(`variable_declarator.value`, `import_from_statement.module_name`, etc.) by literally
-parsing sample snippets and printing the tree, rather than guessing from documentation.
-
-**Is this standard?** Yes — Tree-sitter is what GitHub's own code navigation/highlighting
-uses, and it's become the default choice for any tool that needs multi-language,
-error-tolerant parsing (linters, editors, static analysis).
-
-**Docs:** [Tree-sitter — using parsers](https://tree-sitter.github.io/tree-sitter/using-parsers)
-
----
-
-## Postgres transactional DDL (schema changes roll back too)
-
-**What it is:** in Postgres, `CREATE TABLE`/`ALTER TABLE`/etc. are transactional just
-like `INSERT`/`UPDATE` — if a migration runs several DDL statements and one fails partway
-through, *everything* in that transaction (including the tables/columns that were
-already successfully created earlier in the same migration) gets rolled back together.
-
-**Why this matters:** hit this directly — a migration that created `code_entities`
-successfully, then failed on a later `ALTER TABLE files ADD COLUMN language ...`. Despite
-the partial success, `alembic current` afterward still showed the *previous* revision,
-and `code_entities` didn't exist in the database at all. Nothing needed manual cleanup;
-the whole migration had already been undone automatically.
-
-**Why this is worth knowing generally:** not every database gives you this for free —
-MySQL, for example, does **not** roll back DDL on failure, so a multi-statement MySQL
-migration that fails halfway through can leave a genuinely inconsistent schema that
-needs manual repair. Alembic prints "Will assume transactional DDL" precisely because
-this behavior is database-specific, not a universal guarantee.
-
-**Is this standard?** Yes, for Postgres specifically — one of the reasons Postgres is
-often preferred for schema-migration-heavy applications.
-
-**Docs:** [Postgres — DDL and transactions](https://www.postgresql.org/docs/current/ddl.html) (see the general note on transactional DDL under "Overview")
-
----
-
-## Postgres enums + Alembic: `CREATE TABLE` auto-creates the type, `ALTER TABLE` doesn't
-
-**The gotcha:** adding a new table with an enum column (`code_entities.kind`) worked with
-zero extra effort — SQLAlchemy/Alembic automatically ran `CREATE TYPE entity_kind AS
-ENUM(...)` right before the `CREATE TABLE`. Adding an enum column to an *already-existing*
-table (`files.language`) via plain `op.add_column(...)`, using the exact same `sa.Enum(...)`
-syntax, failed outright: `psycopg.errors.UndefinedObject: type "file_language" does not
-exist`.
-
-**Why they behave differently:** `CREATE TABLE` is understood by SQLAlchemy as "building
-this whole thing from scratch," so it walks every column's type and creates anything that
-needs creating first. A bare `ALTER TABLE ... ADD COLUMN` is a much narrower operation —
-Alembic doesn't infer "and also create this brand-new type" from it; it assumes the type
-already exists.
-
-**The fix:** create the enum type explicitly first, then tell the column not to try
-creating it again:
-```python
-file_language_enum = postgresql.ENUM("PYTHON", "JAVASCRIPT", "TYPESCRIPT", name="file_language")
-file_language_enum.create(op.get_bind(), checkfirst=True)
-op.add_column("files", sa.Column("language", sa.Enum(..., name="file_language", create_type=False)))
-```
-And the reverse on `downgrade()`: dropping the column doesn't drop the type it referenced
-— that needs its own explicit `postgresql.ENUM(name=...).drop(...)`.
-
-**Is this standard?** Yes — a well-known Alembic/Postgres-enum rough edge, not a
-Noetra-specific bug. Worth remembering any time an enum column gets added to a table that
-already exists, rather than created alongside it.
-
-**Docs:** [Alembic — PostgreSQL ENUM cookbook recipe](https://alembic.sqlalchemy.org/en/latest/cookbook.html) (search "postgresql-enum")
-
----
-
-## Alembic autogenerate can't see hand-written raw-SQL DDL
-
-**The gotcha:** a migration added two GIN indexes via `op.execute("CREATE INDEX ...")`
-instead of a SQLAlchemy `Index(...)` object, because they needed a non-default operator
-class (`gin_trgm_ops`) that plain `Index()` can't express. The *next* migration's
-`--autogenerate` run flagged both as "removed" and generated `drop_index` calls for
-them — because autogenerate diffs the live database against `Base.metadata`, and
-anything created outside that metadata (raw SQL) is invisible to it. From
-autogenerate's point of view, a real index it doesn't know about looks identical to one
-that used to be declared and got deleted.
-
-**Why this matters:** blindly running `alembic upgrade head` on an autogenerated
-migration without reading it first would have silently dropped two working, real
-indexes that lexical/fuzzy search depends on.
-
-**The practical rule this confirms:** always read a generated migration's `upgrade()`
-and `downgrade()` before applying it — autogenerate is a diffing *tool*, not a proof
-that the result is correct. This is exactly why Alembic prints "please adjust!" in its
-generated comments.
-
-**Is this standard?** Yes — this is a known, documented limitation of any ORM-metadata-
-diffing autogenerate tool, not specific to this index or to Noetra.
-
-**Docs:** [Alembic — autogenerate limitations](https://alembic.sqlalchemy.org/en/latest/autogenerate.html#what-does-autogenerate-detect-and-what-does-it-not-detect)
-
----
-
-## Precomputed index vs. repeated linear scan (a classic time/space trade-off)
-
-**The bug:** resolving one Python absolute import (`import pkg.mod`) to an actual file
-scanned *every* known file path in the repo, checking if any of them ended with the
-right suffix. Fine on a 12-file repo. On `tensorflow/tensorflow` (36k files, thousands
-of absolute imports), that's thousands of full 36k-item scans — tens to hundreds of
-millions of string comparisons, and it showed up as an ~8-minute stall.
-
-**The fix:** build one lookup structure — a dict mapping every possible path *suffix*
-(`"mod.py"`, `"pkg/mod.py"`, `"src/pkg/mod.py"`, ...) to the real path(s) that end that
-way — **once per repo**, before resolving any imports. After that, each import is a
-single dict lookup (O(1) on average) instead of a fresh scan.
-
-**The general pattern:** this is "do a little more work up front (build an index) to
-make every later lookup cheap," the same idea behind a database index, a hash map, or a
-compiler's symbol table. It costs a bit of memory and a one-time pass over the data; it
-pays for itself the moment you look something up more than once. The tell that you need
-one: doing the *same kind* of scan repeatedly over data that isn't changing between
-scans.
-
-**How it's used in Noetra:** `indexer/graph.py`'s `build_suffix_index`, called once per
-repo inside `resolve_dependencies` before the per-import resolution loop.
-
-**Is this standard?** Yes — recognizing "O(n) work happening inside a loop that runs m
-times, when the data being scanned doesn't change" as an O(n×m) bug, and fixing it with a
-precomputed index, is one of the most common real-world performance fixes there is.
-
----
-
-## Deferred cleanup: the fast path deletes the record, a background task cleans up the side effect
-
-**The gap:** deleting a repo removed its database rows (correctly, via Postgres's own
-cascading foreign keys) but left its cloned files sitting on disk forever — nothing ever
-told the worker's storage volume that repo was gone.
-
-**Why the fix isn't "just call `shutil.rmtree` in the delete endpoint":** the clone
-directory can be many gigabytes with tens of thousands of files; deleting it can take
-real time. `CLAUDE.md`'s module boundary already draws this line elsewhere in the
-project — `api` is the fast HTTP layer and must never do slow, repo-touching work
-inline; that always belongs in a `worker` background task. Deleting a repo is no
-different from cloning one in that respect.
-
-**The pattern:** the API deletes the *authoritative* record (the DB row) and returns
-immediately — from the user's perspective, the repo is already gone. It then enqueues a
-Celery task to clean up the *derived* side effect (the on-disk files) whenever the
-worker gets to it. The two don't need to happen atomically together: nothing else in the
-system reads that directory once the DB row is gone, so a short delay before the actual
-disk space is reclaimed is harmless.
-
-**Why this matters generally:** this is a small instance of a common distributed-systems
-shape — separating "the operation the user is waiting on" (fast, synchronous, strongly
-consistent) from "necessary cleanup of a side effect" (slow, asynchronous, only
-eventually consistent). Trying to make both parts happen together, synchronously, is
-what leads to slow endpoints or half-finished operations when the slow part fails.
-
-**How it's used in Noetra:** `api/repos.py`'s `delete_repository` deletes the `Repository`
-row, then `celery_app.send_task("worker.tasks.delete_repository_clone", ...)`; the new
-`worker.tasks.delete_repository_clone` task does the actual `shutil.rmtree`.
-
-**Is this standard?** Yes — "delete the record now, clean up storage later via a
-background job" is the standard shape for any resource with an expensive-to-remove
-side effect (large file uploads, temp directories, cache entries tied to a deleted
-record, etc.).
-
----
-
-## `recall@k` and the "eval harness"
-
-**What it is:** `recall@k` measures a search system: *of all the correct answers that
-exist, how many did the search surface in its top `k` results?* `recall@k = (relevant
-items found in top k) / (total relevant items)`. Example: "where is `clone_repository`
-defined?" has one correct location; if the search returns it anywhere in the top 5,
-`recall@5 = 1/1 = 100%` for that question; average over ~40 questions to score the whole
-retriever. An **eval harness** is the test infrastructure that runs a fixed set of inputs
-through the system and auto-scores the output against known-correct answers — same idea as
-a unit-test suite, but scored with a metric instead of pass/fail.
-
-**Why we need it here:** retrieval quality is the whole product, and "the answers feel
-good" isn't a measurement. Without a number, every later change (add a retriever, change
-chunking, tune `k`) is guesswork and no regression can be attributed to a specific cause.
-
-**How it's used in Noetra:** `backend/eval/` — `questions.yaml` (~40 questions, each with
-known answer `path`+`lines`, tagged `symbol`/`keyword`/`conceptual`), `seed.py` (indexes 3
-SHA-pinned repos), and `run.py` (runs each question through `core.retrieval.search()` and
-prints `recall@5`/`recall@20`, broken down by kind + repo). The `conceptual` row was the
-case for building M6's semantic (embedding) leg, and is what its recall delta is judged on.
-
-**Family:** `recall@k` is order-*unaware* (in-top-k or not). Order-aware cousins: **MRR**
-(rewards the first correct hit being near rank 1), **MAP@k**, **NDCG@k** (graded
-relevance). We use `recall@k` because our ground truth is binary (a location is correct or
-not) — MRR is the natural add-on later if recall alone stops being diagnostic.
-
-**Is this standard?** Yes — the standard offline-evaluation setup for any
-retrieval/RAG/search system; NDCG is the most common in IR research.
-
-**Docs:** [Pinecone — offline retrieval evaluation](https://www.pinecone.io/learn/offline-evaluation/)
-
----
-
-## Postgres full-text search (`tsvector` / `tsquery` / `ts_rank`)
-
-**What it is:** Postgres's built-in keyword search. It preprocesses text into a `tsvector`
-— a list of normalized, *stemmed* words with positions ("running"→"run") — and matches it
-against a `tsquery` with the `@@` operator. `ts_rank` scores how well a document matches,
-for ordering. Trigram search (`pg_trgm`) is a *separate*, fuzzier tool: it breaks strings
-into 3-char chunks and matches by overlap, so `createTok` finds `createToken` — good for
-identifiers/typos, where stemming-based full-text is wrong.
-
-**Why we need it here:** it's the "lexical" leg of retrieval — cheap, exact-ish keyword
-matching over file content and symbol names, already indexed at the DB level (a GIN index
-on `content_tsv`, a trigram GIN index on `code_entities.name`).
-
-**How it's used in Noetra:** `core/retrieval/lexical.py` runs
-`content_tsv @@ websearch_to_tsquery('english', :q)` ordered by `ts_rank`. A trigram-based
-`structural.py` retriever also matched symbol names with the `%` operator + `similarity()`
-for a while (M5), but was removed after measurement showed it moving recall@5 by only
-+0.04 — see `docs/RETRIEVAL.md`'s decision record. **Key choice — `websearch_to_tsquery`**
-(not `to_tsquery` or
-`plainto_tsquery`): it accepts raw Google-style user input (`auth OR "session cookie"`)
-and *never raises* on junk, whereas `to_tsquery` 500s on a stray space. That safety is why
-it's the right pick for a user-facing search box.
-
-**Is this standard?** Yes — `tsvector`+GIN is the standard way to do full-text search in
-Postgres without a separate engine (Elasticsearch etc.); `pg_trgm` is the standard
-fuzzy/substring companion.
-
-**Docs:** [Postgres full-text search](https://www.postgresql.org/docs/current/textsearch.html) ·
-[pg_trgm](https://www.postgresql.org/docs/current/pgtrgm.html)
-
----
-
-## Reciprocal Rank Fusion (RRF)
-
-**What it is:** a way to merge several ranked lists into one using only each item's *rank
-position* — not the retrievers' raw scores. Formula: an item's fused score is `sum over
-lists of 1/(k + rank)`, with `k` a dampening constant (60 is the standard from the
-original paper). An item ranked #1 in a list contributes `1/61`; #2 contributes `1/62`;
-items that rank well in *several* lists rise to the top.
-
-**Why we need it here:** retrievers' scores aren't comparable — `ts_rank` (a full-text
-relevance float) and a semantic retriever's cosine similarity (0–1) would live on totally
-different scales. Averaging them would be meaningless. RRF sidesteps the problem by
-throwing away the scores and using only rank order.
-
-**How it's used in Noetra:** `core/retrieval/fusion.py::reciprocal_rank_fusion` merges
-ranked lists, keys each hit by its code location, sums `1/(k+rank)`, unions the source
-retrievers on duplicates, and returns the top hits. It briefly fused lexical + a
-structural (trigram) retriever in M5, then went dormant — the structural leg was cut after
-an ablation showed it moving recall@5 by only +0.04 (see `docs/RETRIEVAL.md`), and one
-list alone needs no fusion. It's wired back in — just one more list in the input, no other
-code changes — once the M7 semantic leg ships. (Current limitation: it dedupes by *exact*
-line range, so the same location surfaced with slightly different ranges by two
-retrievers isn't merged yet — deferred until the eval shows it matters.)
-
-**Is this standard?** Yes — RRF is the go-to fusion method for hybrid search (keyword +
-vector); popular precisely because it's robust and needs zero score calibration.
-
-**Docs:** [Cormack et al., 2009 — the RRF paper (PDF)](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)
-
----
-
-## Repo map (PageRank over the import graph)
-
-**What it is:** a compressed, names-only "table of contents" of a codebase — every file
-with just its top-level symbols (no bodies) — handed to an AI agent *before* it starts
-searching, so it orients from a floor plan instead of blindly guessing search terms.
-Because a big repo has too many symbols to list them all, you rank them with **PageRank**
-over the import graph (the same "important if many important things link to it" algorithm
-Google used for web pages) — a file many files import is probably central, so its symbols
-make the map; leaf files get trimmed.
-
-**Why we need it here:** agentic search (how the chat agent works — search/read in a loop,
-like Claude Code) has one weak moment: the *first* tool call, where it must guess a search
-term with no sense of the codebase's shape. That's worst on vague questions ("how is auth
-implemented?"). The repo map replaces that blind first guess with an informed one — built
-entirely from data we already have, with zero AI calls.
-
-**How it's used in Noetra:** scoped into **Milestone 8** (not built yet — renumbered when
-the build order moved to agentic RAG). It'll be built from `code_entity` (symbol names) +
-`dependency_edge` (import graph → PageRank centrality) and placed in the agent's byte-stable
-prompt prefix, so Gemini's implicit prefix caching keeps it cheap per follow-up (see the CAG
-entry above for the minimum-prompt-length caveat). Caveat: raw centrality over-ranks generic
-utilities (a `utils.py` everyone imports) — PageRank dampens but doesn't fully fix this;
-fine, because the map only needs to *orient* the agent, which then verifies by reading files.
-
-**Is this standard?** The pattern comes from **aider** (an open-source coding agent), which
-runs PageRank over the repo's dependency graph to build its "repo map". Using a lightweight
-structural map to steer an agent is an increasingly common technique.
-
-**Docs:** [aider — repository map](https://aider.chat/docs/repomap.html)
-
----
-
-## Commit SHA & "pinning" to one
-
-**What it is:** a **SHA** is the ID git computes for every commit from its exact contents
-(file tree + message + parent + author). Change one byte → completely different SHA. The
-key property: a SHA points at one **immutable, frozen snapshot** of the code, forever —
-called *content-addressing* (the address is a fingerprint of the content). "Pinning" means
-referring to code by its SHA instead of by a moving name.
-
-**Why we need it here:** the eval's answer keys ("question X → `fusion.py` lines 23–48") are
-only correct against one exact version of the code. A **branch** name (`main`) moves every
-time upstream commits — line 40 becomes line 55 tomorrow — and even **tags** can be
-re-pointed. A SHA can't move, so the keys stay valid forever. It matters double for noetra,
-since we actively edit it: pinning to a SHA and indexing that snapshot keeps its keys stable
-no matter how much `develop` changes afterward.
-
-**How it's used in Noetra:** `eval/repos.py` pins each eval repo to a 40-char SHA;
-`eval/seed.py` does `git fetch --depth 1 origin <sha>` + `git checkout <sha>` to get that
-exact tree.
-
-**Is this standard?** Yes, everywhere — pinning dependency versions in a lockfile, pinning a
-Docker image by digest (`@sha256:…`) instead of `:latest`. The pattern is always: *replace a
-name that can move with a fingerprint that can't, for reproducibility.*
-
-**Docs:** [Git — commit objects & SHAs](https://git-scm.com/book/en/v2/Git-Internals-Git-Objects)
-
----
-
-## Query relaxation (`websearch_to_tsquery` joins bare terms with AND)
-
-**What it is:** when you hand `websearch_to_tsquery` a plain sentence, it ANDs every
-surviving word together. `"where are user credentials protected before being written to the
-database?"` compiles to `'user' & 'credenti' & 'protect' & 'written' & 'databas'` — a
-document must contain **all five** to match at all. Stopwords ("where", "are", "the") get
-dropped, but the rest are mandatory. **Query relaxation** means retrying with the terms
-OR'd together when the strict form returns too little.
-
-**Why we need it here:** this single behaviour was holding conceptual `recall` at exactly
-**0.00**. Not "ranked badly" — the retriever was returning an *empty list*, because almost
-no file contains every word of a natural-language question. Any amount of ranking work
-downstream is worthless if the candidate set is empty.
-
-**How it's used in Noetra:** `core/retrieval/lexical.py` runs the strict query first, and
-only if it returns fewer than `limit` hits does it run a second pass with the terms joined
-by ` OR ` and backfill the empty slots. Strict hits keep their positions, so the change
-**cannot** regress precision — and the eval proved it, since the symbol and keyword buckets
-came back byte-identical while conceptual moved. The OR query is built in *websearch
-syntax* (not raw `|` operators) so Postgres still does the stemming and still never raises
-on junk.
-
-**Is this standard?** Yes. Elasticsearch exposes it directly as `minimum_should_match`
-("match at least N of these terms"). Postgres has no equivalent, so the two-pass fallback
-is how you get the same behaviour.
-
-**Docs:** [Postgres — controlling text search](https://www.postgresql.org/docs/current/textsearch-controls.html) ·
-[Elasticsearch — `minimum_should_match`](https://www.elastic.co/docs/reference/query-languages/query-dsl/query-dsl-minimum-should-match)
-
----
-
-## Vocabulary drift: match with the same stemmer the index used
-
-**What it is:** a full-text index doesn't store your words, it stores **lexemes** — stemmed,
-lowercased, stopword-filtered tokens. "credentials" is stored as `credenti`. If some other
-part of your code later tries to answer "where did this match?" using the *raw* words, it's
-searching a different vocabulary than the one that matched. That mismatch is vocabulary
-drift.
-
-**Why we need it here:** `_best_line` picked which line to cite by checking whether a query
-word appeared *literally* in the line. The index had matched on stems. So a file could match
-on `credenti` while the literal string "credentials" appeared nowhere — every line scored
-zero, and the function returned **line 1**. Retrieval found the right file and then threw the
-citation away. Six of nine remaining misses were this one bug.
-
-**How it's used in Noetra:** the fix is to *ask the engine for its own vocabulary* rather
-than re-derive it. `core/retrieval/lexical.py::_query_lexemes` runs
-`tsvector_to_array(to_tsvector('english', :query))`, which returns exactly the lexemes
-Postgres would use, then matches source words by **stem prefix** (`credenti` is a prefix of
-"credentials"). The tempting alternative — writing a stemmer in Python — would have
-reintroduced the exact drift being fixed, and would silently diverge whenever Postgres
-changed.
-
-**Is this standard?** The principle is general and worth naming: **never reimplement a
-component's normalization; ask it what it did.** Same reason you compare passwords with the
-library's `verify()` instead of re-hashing yourself, and why `ts_headline` exists rather than
-having you locate matches by hand.
-
-**Docs:** [Postgres — text search functions](https://www.postgresql.org/docs/current/functions-textsearch.html)
-
----
-
-## AST chunking (the retrieval unit decides how good a citation can be)
-
-**What it is:** an **AST (abstract syntax tree)** is the structured tree a parser builds out
-of source code. Instead of a flat wall of text, the file becomes "this module contains a
-class, that class contains these three methods, each method runs from line X to line Y".
-Tree-sitter is what produces it here. **AST chunking** means cutting a file into search units
-along those **syntax boundaries** — one chunk per function/method — instead of by a fixed
-line or token count. The rule is that a chunk must never split a function in half, because
-half a function retrieves as noise.
-
-**Why we need it here:** the unit you index is the unit you can cite. Indexing whole *files*
-means a hit is "this file matched" and something has to *guess* which line to point at —
-which is exactly the bug above. Indexing *chunks* means the line range comes free and exact,
-because the chunk already knows its own boundaries. It also decides what the M6 agent
-receives: a file-level hit forces a second `read_file` call that pulls ~1,200 lines into
-context to answer a question about 25 of them; a chunk-level hit *is* the answer.
-
-**How it's used in Noetra:** `indexer/chunker.py` (pure, no DB) emits one chunk per **leaf
-entity** — an entity containing no other entity, so a class produces chunks for its methods
-rather than a second copy of the whole class — plus **gap chunks** covering every line no leaf
-covers (imports, module constants, class headers, and whole files with no entities at all,
-like markdown or JSON). Gaps have no syntax to damage, so only they get split at a fixed size
-(`MAX_GAP_LINES = 80`). Measured effect: keyword `recall@5` went 0.79 to 0.93.
-
-**Is this standard?** Yes, and it's the consensus for code specifically — fixed-size chunking
-is the default for prose but actively harmful for source, where a function is the natural
-semantic unit. Note chunking is **independent of embeddings**: it's a prerequisite for them,
-but it pays off on its own through exact citations and smaller agent payloads.
-
-**Docs:** [Anthropic — contextual retrieval](https://www.anthropic.com/news/contextual-retrieval)
-
----
-
-## Result diversity ("collapsing") and the SQL window function that does it
-
-**What it is:** capping how many results a single group (here, one file) may contribute, so
-one strongly-matching document can't fill the entire result list and hide everything else.
-Search engines call this **collapsing**; the general idea is trading a little raw relevance
-for coverage.
-
-**Why we need it here:** switching to chunks quietly *regressed* `recall@20` from 0.79 to
-0.74. The cause wasn't ranking — it was arithmetic. Twenty slots used to mean twenty distinct
-**files**; with chunks it could mean twenty chunks from **ten** files. On one query,
-`docs/CONCEPTS.md` alone took **8 of 20 slots**. The file holding the answer never appeared,
-and a caller can't recover a file it was never shown.
-
-**How it's used in Noetra:** `core/retrieval/lexical.py` uses a **window function** —
-`row_number() OVER (PARTITION BY file_id ORDER BY rank DESC)` — then keeps only rows where
-that number is at most `_MAX_CHUNKS_PER_FILE`. A window function computes a value *per row
-relative to a group of other rows*, without collapsing them the way `GROUP BY` does; here it
-ranks each file's chunks against each other. It has to happen in SQL, in a subquery, because
-`LIMIT 20` would otherwise have already discarded every file past the crowding one — capping
-in Python afterwards would be too late.
-
-**Is this standard?** Yes — Elasticsearch has a `collapse` parameter for exactly this;
-maximal marginal relevance (MMR) is the more general form used in RAG pipelines. Window
-functions are core SQL, not a Postgres extension.
-
-**Docs:** [Postgres — window functions](https://www.postgresql.org/docs/current/tutorial-window.html) ·
-[Elasticsearch — collapse](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/collapse-search-results)
-
----
-
-## Query-time boosting (weighting one class of document above another)
-
-**What it is:** multiplying a relevance score up or down based on what *kind* of document it
-is, rather than how well it matched. A factor of 0.3 on a class means those documents need
-roughly 3x the raw score to outrank a normal one.
-
-**Why we need it here:** an `english` text-search config is built for English prose, so on a
-natural-language query it ranks *writing about* code far above the code itself. Diagnosing the
-chunking regression showed noetra's entire top-20 was `docs/*.md` — not one source file — and
-requests was returning `HISTORY.md` and **`LICENSE`** ahead of the module that implements the
-behaviour. For a tool whose product is `file:line` citations into source, that's simply wrong.
-
-**How it's used in Noetra:** `core/retrieval/lexical.py` multiplies `ts_rank` by
-`_NON_SOURCE_RANK_FACTOR = 0.3` where `file.language IS NULL` — which is already exactly the
-non-py/js/ts set, so no new data was needed. Docs stay reachable, just below code. This was
-the single largest fix of the session: conceptual `recall@5` went 0.14 to 0.36 and overall
-`@20` went 0.76 to 0.81.
-
-**Is this standard?** Yes — per-field and per-index boosts are a basic feature of every search
-engine (Elasticsearch `boost`, Lucene field weights). The general lesson is that *relevance
-and importance are different things*, and a scorer only knows the first one.
-
-**Docs:** [Elasticsearch — bool query and boosting](https://www.elastic.co/docs/reference/query-languages/query-dsl/query-dsl-bool-query)
-
----
-
-## When your eval can't referee the change you're making
-
-**What it is:** a benchmark can only judge a change if its answer key is *neutral* about that
-change. If every correct answer happens to sit in the category you just promoted, the score
-goes up whether or not the change was good — the metric is measuring your assumption back at
-you rather than testing it.
-
-**Why we need it here:** all 42 original questions had answers in **source files**. So
-demoting non-source files (the boost above) was guaranteed to improve the number, no matter
-how far the penalty was cranked. Setting the factor to 0.001 would have "scored better" while
-making documentation permanently unreachable. The number was real; its *interpretation* wasn't
-safe.
-
-**How it's used in Noetra:** `eval/questions.yaml` gained a fourth question kind, `docs`, with
-4 questions whose answers genuinely live in prose (`DEPLOYMENT.md`, `quickstart.rst`,
-`advanced.rst`, `metadata.mdx`). They aren't retrieval targets — they're a **guard-rail**: if
-the penalty is ever tuned too hard, that row collapses and says so. It reported `@5 0.75` /
-`@20 1.00`, confirming 0.3 demotes docs without burying them. Making it a *separate kind*
-rather than more `conceptual` questions kept every existing bucket's denominator unchanged, so
-all earlier runs stayed comparable.
-
-**Is this standard?** The failure mode has names — *benchmark gaming*, *construct validity*,
-and (when the metric becomes the target) **Goodhart's law**. The habit worth keeping: whenever
-you add an optimization, ask *"could this metric go up while the product gets worse?"* If yes,
-add the case that would catch it **before** trusting the number.
-
-**Docs:** [Goodhart's law](https://en.wikipedia.org/wiki/Goodhart%27s_law)
-
----
-
-## Who calls a component changes what it gets fed (input distribution)
-
-**What it is:** the same function can be handed completely different-looking inputs depending
-on who is calling it, and a benchmark only tests the caller it imitates. The mix of inputs a
-component actually sees in production is its **input distribution**. Measure against the wrong
-one and you can spend weeks optimizing a case that never occurs — or miss one that does.
-
-**Why we need it here:** `core/retrieval.search()` has two callers with very different habits.
-The `/search` endpoint hands it whatever a human typed into a box, so it really does receive
-`"Why do header lookups work no matter how you capitalize them?"` word for word. The M6 chat
-agent will not: it reads the question, works out that the codebase probably calls this thing a
-"case-insensitive dict", and calls `code_search("case insensitive headers")`. Same function,
-two different worlds.
-
-The eval harness only imitates the first caller — it feeds every question in verbatim. So the
-`conceptual` bucket's low score is an **honest** measure of the search UI and a **pessimistic**
-one for the agent, because it charges retrieval for a translation step the agent would have
-done first. That distinction matters a lot, because the conceptual bucket is the main evidence
-in the "do we need embeddings (M7)?" decision — and half of what it's currently measuring is a
-step that won't exist in the agent path.
-
-**How it's used in Noetra:** noted so it doesn't get forgotten: when M6 lands, `eval/run.py`
-should score **agent-mediated** retrieval next to raw `search()` — same 42 questions, two
-columns. That's the only way the repo map (which never touches `search()` and so cannot move
-today's numbers at all) can earn its place the way every retriever has had to.
-
-**Is this standard?** Yes, and it's one of the most common ways benchmarks mislead. It's the
-same reason a model evaluated on clean text degrades on real user typos, and why "offline
-metric went up, online metric didn't" is a well-known result in search and recommender teams.
-The habit: before trusting a number, ask *"who generates the inputs in production, and is that
-who my harness is imitating?"*
-
-**Docs:** [Wikipedia — dataset shift](https://en.wikipedia.org/wiki/Dataset_shift)
-
----
-
-## Agentic RAG (vs. plain/hybrid RAG)
-
-**What it is:** in plain RAG, retrieval happens **once**, before the model ever sees the
-question — you embed the query, fetch top-k chunks, stuff them in the prompt, generate an
-answer. In **agentic RAG**, retrieval is a *tool* the model itself calls, as many times as
-it wants, in whatever order it decides, mid-reasoning. The model can look at a result, decide
-it's not enough or points somewhere else, and search again — the way a person actually
-investigates a codebase, not a single fixed lookup.
-
-**Why we need it here:** code questions vary wildly in how much digging they need. "Where is
-`createToken` defined?" needs one lookup. "How does authentication work end-to-end?" might
-need a search, then reading the file that came back, then following an import or a function
-call to see who else is involved, then maybe searching again with better words. A single
-fixed retrieval step can't adapt to that — it either over-fetches for the easy question or
-under-fetches for the hard one.
-
-**How it's used in Noetra:** the M8 chat agent is a LangGraph loop with five tools
-(`code_search`, `read_file`, `list_dependencies`, `get_callers`, `get_callees`) that the model
-calls freely until it decides it has enough to answer. `core/retrieval` still does the actual
-retrieving underneath — agentic RAG is a change in *who decides when to call it and how many
-times*, not a replacement for having good retrievers. See `docs/RETRIEVAL.md`.
-
-**Is this standard?** Yes, and increasingly the default for coding agents specifically —
-Claude Code, Cursor, and Copilot's newer agent modes all work this way (search/read in a loop)
-rather than doing one embedding lookup and answering. The term gets used loosely though; the
-real test is whether retrieval strategy can change *per query* based on what the model
-decides, not just "an LLM with some tools attached."
-
-**Docs:** [Anthropic — building effective agents](https://www.anthropic.com/research/building-effective-agents)
-
----
-
-## Gemini embedding quirks: task_type, dimensions, normalization
-
-**What it is:** three provider-specific details of `gemini-embedding-001` that are each easy
-to get subtly wrong, because getting them wrong doesn't error — it just quietly makes
-retrieval worse.
-
-1. **`task_type` is asymmetric.** You tell the API *what the text you're embedding is for* —
-   `RETRIEVAL_DOCUMENT` when indexing a chunk, `CODE_RETRIEVAL_QUERY` when embedding a user's
-   question. Using the same task type for both sides works, but the vectors land in slightly
-   worse relative positions for the retrieval task specifically.
-2. **Dimensions are truncatable but normalization isn't automatic below the max.** The model's
-   native output is 3072 numbers, and Google supports cutting that down to 1536 or 768
-   (a technique called **Matryoshka Representation Learning** — the embedding is trained so
-   that a prefix of it is *also* a valid, if less precise, embedding). But the API only
-   pre-normalizes the vector to unit length at the full 3072 size — truncate to 1536 and you
-   have to normalize it yourself before comparing vectors by cosine similarity.
-3. **Input caps at 2048 tokens** (~8 KB) — smaller than some function bodies in a real
-   codebase, so long chunks need truncating before they're sent.
-
-**Why we need it here:** we truncate to 1536 dims specifically because pgvector's HNSW index
-(the thing that makes nearest-neighbor search over embeddings fast) only supports up to 2000
-dimensions on its plain `vector` type — 3072 would force a different, less common storage type
-(`halfvec`). Getting the normalization step wrong after truncating wouldn't throw an error;
-it would just make every similarity search return slightly-to-very wrong rankings, silently.
-
-**How it's used in Noetra:** `core/ai/embeddings.py` (M6) is the one place that calls this
-model. It sets `task_type` per direction, truncates long `embed_text` before sending, and
-L2-normalizes every vector it gets back before it's stored in `chunk.embedding vector(1536)`.
-
-**Is this standard?** Yes — every major embedding provider (OpenAI, Cohere, Gemini) that
-offers Matryoshka truncation documents this same "only the max size is pre-normalized"
-caveat. It's a known enough gotcha that it's worth checking explicitly for any embedding model
-before trusting cosine similarity on a truncated vector.
-
-**Docs:** [Gemini embeddings guide](https://ai.google.dev/gemini-api/docs/embeddings) ·
-[Matryoshka Representation Learning (paper)](https://arxiv.org/abs/2205.13147)
-
----
-
-## Hand-rolling a LangGraph `StateGraph` vs. `create_react_agent`
-
-**What it is:** LangGraph's `langgraph.prebuilt.create_react_agent` is a one-line function
-that builds a complete "call the model, run any tool calls, loop until done" agent for you.
-The alternative is defining the same loop yourself as an explicit `StateGraph`: you write the
-state object (what gets threaded through every step), the node that calls the model, the node
-that runs tools, and the edge/function that decides "loop again" vs. "we're done."
-
-**Why we need it here:** the prebuilt gets you a working agent fast, but it also means the
-loop's internals are someone else's code. Noetra's agent needs two custom behaviors that are
-awkward to bolt onto a prebuilt: collecting citations from tool results as the loop runs (not
-asking the model to report them), and priming the prompt with a stable repo map. A hand-rolled
-graph makes both just... a node, written in plain code you can read top to bottom.
-
-**How it's used in Noetra:** M8's `core/agent/graph.py` defines the loop explicitly:
-
-```
-START ──> call_model ──> should_continue? ──> tools ──┐
-                              │                       │
-                              └──> END       <────────┘
-```
-
-`call_model` binds the five retrieval tools and invokes `gemini-2.5-flash`; a `ToolNode`
-executes whatever tool calls came back; `should_continue` checks the last message for pending
-tool calls and either loops back to `call_model` or ends. LangGraph's job here is only to
-*execute* this graph (manage the state passing between nodes) — the actual decision logic is
-all ours.
-
-**Is this standard?** Both are legitimate, standard LangGraph usage — `create_react_agent` is
-literally in `langgraph.prebuilt`, meant for exactly this. The trade-off is the classic one
-between a framework default (less code, less control, matches "do it the standard way" for
-simple cases) and writing the mechanism yourself (more code, but nothing about how the loop
-works is hidden from you). For a project meant partly for learning and being able to explain
-the agent loop in an interview, hand-rolling is the deliberate choice here.
-
-**Docs:** [LangGraph — build a basic ReAct agent from scratch](https://langchain-ai.github.io/langgraph/tutorials/introduction/) ·
-[Google's own from-scratch ReAct + Gemini example](https://ai.google.dev/gemini-api/docs/langgraph-example)
-
----
-
-## Seeding a graph traversal from search hits (and why it couples retrievers)
-
-**What it is:** the M7 graph leg isn't a retriever you can query directly with English text —
-it walks edges between known locations. So to make it contribute to a fused search result, we
-**seed** it: take the top few hits lexical and semantic already found, resolve each to a code
-symbol, and walk outward from those symbols (who calls them, what imports them) up to a couple
-of hops. That walk becomes a third ranked list, fused in via RRF alongside the other two.
-
-**Why we need it here:** it's the only way to get graph traversal into a single fused ranking
-at all, since traversal has no notion of "how well does this match the query" on its own — it
-only knows "how far is this from a starting point." But seeding from the *other* retrievers'
-top hits means the graph leg isn't independent of them: if lexical and semantic both latch
-onto the wrong file, the graph leg then walks outward from that same wrong file and returns
-more results that reinforce the mistake, instead of an independent signal that might catch it.
-
-**How it's used in Noetra:** deliberately accepted as a trade-off, not an oversight — the
-alternative (an independent graph retriever) doesn't really exist for this kind of data. The
-safeguard is measurement: M7 ends with the same in/out ablation (run the eval with the graph
-leg in the fusion, then out, compare `recall@k`) that got the trigram symbol-lookup retriever
-cut back in M5. If the coupling costs more than the leg gains, the number will show it.
-
-**Is this standard?** The general pattern — expand a retrieved result via a knowledge graph or
-citation graph, then re-rank — shows up in academic search and recommendation systems, and is
-sometimes called "graph-based re-ranking" or "seed-and-expand." The coupling risk described
-here is the same reason ensemble methods generally prefer *independent* models: correlated
-errors don't cancel out the way independent ones do, which is precisely what RRF over
-independent retrievers is designed to exploit.
-
-**Docs:** [Reciprocal Rank Fusion (original paper, Cormack et al. 2009)](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)
+## B. Design decisions
+
+### B1. FastAPI over Flask / Django
+**Chose:** FastAPI + Pydantic v2. **Alternative:** Flask (minimal, sync) or Django (batteries
+included, ORM, admin). **Why:** validation at the HTTP boundary is a type annotation, not a
+hand-written check; the OpenAPI schema falls out for free (frontend types are generated, never
+hand-maintained twice); native async matters for the SSE chat stream. Django's ORM/admin buy
+nothing here — SQLAlchemy + Alembic are already the DB layer.
+
+### B2. Postgres (+ pgvector) over MySQL, and over a separate vector database
+**Chose:** one Postgres. **Alternative:** MySQL; or Postgres + Pinecone/Qdrant for vectors.
+**Why:** transactional DDL (A9 — a failed migration rolls back cleanly; MySQL's doesn't);
+built-in full-text search with generated columns (B9); pgvector keeps embeddings, files,
+chunks, and ownership in *one* transaction and one `WHERE repository_id =` filter. A second
+datastore is a second thing to sync, secure, and keep consistent — unjustified at V1 scale.
+
+### B3. Celery + Redis over threads / RQ / cron
+**Chose:** Celery workers behind a Redis broker. **Alternative:** background threads in the
+API process; RQ; a cron-driven poller. **Why:** indexing is minutes of bursty work; the API
+and the worker scale on different curves and must be separately deployable. Threads die with
+the request process; RQ is Linux-only and thinner on retries/routing. Producer/consumer
+decoupling is `send_task` by *name* — `api` never imports `worker`.
+
+### B4. Redis as broker and lock, not as result backend
+**Chose:** Celery broker + per-repo lease (A8). **Alternative:** Celery's Redis result backend
+for job status. **Why:** indexing status must be queryable and joined to ownership — it's a
+domain field (`Repository.status` in Postgres), not a task return value keyed by task id.
+
+### B5. Signed-cookie sessions over server-side sessions / JWT
+**Chose:** Starlette `SessionMiddleware` (`itsdangerous`) holding `{"user_id"}`. **Alternative:**
+a sessions table or Redis store; JWTs. **Why:** the API stays stateless with no extra lookup
+per request; the cookie is *signed* (tamper-evident) not encrypted — fine because `user_id`
+isn't secret. JWT is the same idea with more ceremony and no revocation story. Logout is
+local only — OAuth 2.0 has no logout endpoint (that's an OIDC feature GitHub doesn't implement).
+
+### B6. Encrypt (Fernet) the stored GitHub token; never hash it
+**Chose:** symmetric encryption, key in env. **Alternative:** hashing, as for passwords.
+**Why:** we need the *original* token back to clone on the user's behalf; hashing is one-way.
+Standard for any app storing third-party OAuth tokens.
+
+### B7. Ownership inside the query; 404 over 403
+**Chose:** `WHERE id = :id AND user_id = :me` in one query, 404 on no row. **Alternative:**
+fetch by id, then check owner, 403 on mismatch. **Why:** the fused query cannot forget the
+check (the standard IDOR fix), and 404 doesn't leak that the id exists. The client is never
+a trust boundary — a missing button is not authorization.
+
+### B8. Tree-sitter over per-language parsers
+**Chose:** one parser API, one grammar package per language. **Alternative:** Python's `ast`
+plus Babel/TypeScript's compiler for JS/TS. **Why:** three languages behind one code path;
+error-tolerant (a syntax error elsewhere in a file doesn't kill the parse); syntactic only,
+which is *why* import and call resolution are separate steps on top. Gotcha: TS and TSX ship
+as two grammars in one package.
+
+### B9. Postgres full-text search over Elasticsearch
+**Chose:** a generated `tsvector` column + GIN index. **Alternative:** Elasticsearch/OpenSearch.
+**Why:** `GENERATED ALWAYS AS (to_tsvector(...)) STORED` maintains itself — no indexing step,
+no drift, one migration. Reaching for a search engine before outgrowing Postgres FTS is a
+whole extra datastore for nothing at this scale.
+
+### B10. Lexical retrieval first; embeddings last
+**Chose:** build order lexical (M5) → semantic (M6) → agent (M7) → graph tools (M8). **Alternative:**
+vector-first RAG. **Why:** code is mostly identifiers, and the identifier you want is usually
+literally in the file — exact match wins whenever an exact match exists. Embeddings earn
+their keep only where the user's words appear *nowhere* in the code — real, important, a
+minority. Lexical was one migration to build and trivial to throw away; embeddings cost a
+full re-embed whenever chunking changes. So: build cheap, measure, then buy the expensive one.
+Also why a bare-identifier query is routed straight to lexical with no embedding call.
+
+### B11. RAG over CAG (whole repo in a cached prompt)
+**Chose:** retrieval. **Alternative:** put the entire codebase in the prompt and rely on
+prefix caching. **Why:** ~1M tokens ≈ 100k LOC (many repos are 10–30× that); ~10× the
+per-question cost; and the killer — cache TTLs are minutes, so N users × M repos queried
+occasionally re-pay the cache write constantly. Two ideas kept: a byte-stable prompt prefix
+(system → tools → repo map, no timestamps) and a small-repo fast path as a V2 seam.
+
+### B12. AST chunking with a context prefix, over fixed windows
+**Chose:** one chunk per leaf entity + gap chunks, each embedded as
+`path › class › signature\n<body>`. **Alternative:** fixed 512-token windows. **Why:** the
+unit you index is the unit you can cite — a chunk knows its own line range, a window splits
+functions in half. The prefix is contextual retrieval for the price of an f-string: a bare
+`def refresh(token)` is ambiguous; with its path and class it lands near "authentication".
+The lexical index is built over the same prefixed text, so it gets the context for free.
+
+### B13. RRF fusion; no reranker in V1
+**Chose:** weighted Reciprocal Rank Fusion (`Σ w/(k + rank)`, `k=10`, semantic 2×).
+**Alternative:** weighted *score* averaging; a cross-encoder reranker on top. **Why:**
+`ts_rank` and cosine similarity are on incomparable scales — RRF uses only rank positions,
+so nothing needs calibration; the per-leg weight sizes each leg's vote, and both `k` and the
+weight were set by measurement, not taken from the paper (A22). A reranker
+is the standard next stage (fuse wide, cut narrow) and is deferred, not rejected: the agent's
+own ability to discard bad tool results covers it until the eval says otherwise.
+
+### B14. Exact cosine scan; no HNSW / IVFFlat index
+**Chose:** `ORDER BY embedding <=> q` over every chunk of the repo. **Alternative:** an ANN
+index (HNSW is the usual pick — no training step, better recall than IVFFlat). **Why:** the
+per-file cap is a window function over the whole `repository_id` partition, which forces a
+full sort — the index would sit unused. And a plain HNSW index returns *global* top-k before
+the `WHERE repository_id` filter applies, silently under-returning (pgvector 0.8's
+`hnsw.iterative_scan` fixes it at the cost of a version pin and a `SET LOCAL`). Below roughly
+10⁵ vectors per partition exact search wins on correctness and often latency — the
+brute-force vs ANN crossover. "Which ANN index" was the wrong first question. Revisit when
+per-repo chunk counts make the scan show up in the latency budget.
+
+### B15. `recall@k` on SHA-pinned repos as the scoreboard
+**Chose:** 46 questions with known answer locations, line-level `recall@5`/`@20`, repos pinned
+to commit SHAs. **Alternative:** precision, MRR, nDCG; or "the answers feel good".
+**Why:** downstream, the agent can discard a bad hit but cannot recover a file retrieval
+never surfaced — a miss is unrecoverable, noise is not. Line-level next to file-level makes
+"right file, wrong line" its own number. A SHA is content-addressed and immutable; a branch
+moves the line numbers out from under the answer keys. The eval feeds *raw English* to
+`search()`, which the agent never will (it reformulates first) — so the conceptual bucket is
+honest for the search UI and pessimistic for the agent; M7 scores agent-mediated retrieval
+alongside.
+
+### B16. Agentic RAG with a hand-rolled LangGraph `StateGraph`
+**Chose:** retrieval as tools the model calls in a loop; the graph (state, `call_model`,
+`ToolNode`, `should_continue`) written out by hand. **Alternative:** single-shot RAG; or
+`create_react_agent`. **Why:** code questions vary from "one lookup" to "search, read, follow
+a caller, search again" — a fixed pre-LLM retrieval step can't adapt per query. Single-shot
+would be deleted a week after the tools existed. Hand-rolling is the deliberate choice so the
+citation-collection node and repo-map priming are plain code, and so the loop can be
+explained end to end. Citations come from tool-result metadata, never from the model.
+
+### B17. ~~Seeded graph expansion as a third fusion leg (accepted coupling)~~ — superseded by B20
+**Chose (then):** walk `reference_edge ∪ dependency_edge` outward from the top lexical +
+semantic hits and fuse the result in, accepting that a wrong seed gets reinforced rather than
+cancelled. **Reversed 2026-09-04** before any code: the "traversal has no notion of query
+relevance" sentence in the rationale was the argument *against* fusing it, not for. Kept
+here because the reversal is the interesting part — see A23 and B20.
+
+### B18. Paid OpenAI embeddings over Gemini's free tier
+**Chose:** `text-embedding-3-small`, `EMBEDDING_PROVIDER` + one key as the whole switch.
+**Alternative:** keep the free tier and keep engineering around its quotas. **Why:** A20 —
+the quota machinery was outgrowing the feature, and a silent fallback had already produced
+one untrustworthy number. At ~$0.02 per million tokens the cost argument is gone; native
+1536 dims and provider-normalized vectors also removed two correctness footguns. Embeddings
+stay single-provider on purpose: switching providers means a full re-embed regardless, so a
+live switch has no use case.
+
+### B19. One EC2 host + Docker Compose, provisioned by Terraform
+**Chose:** the same Compose stack as local dev on a single EC2 instance, every AWS resource
+declared in Terraform. **Alternative:** ECS Fargate services for `api`/`worker` with RDS and
+ElastiCache; EKS. **Why:** zero drift between dev and prod (same `docker-compose.yml`), one
+bill, one box to reason about — and V1 load (a handful of users, bursty indexing) doesn't
+need `api` and `worker` scaling independently yet. Terraform over console clicks: reviewable,
+reproducible, destroyable. What changes the answer: worker queue depth or API latency that
+one instance can't absorb — at that point split the worker into its own instance/service and
+move Postgres to RDS first (it's the only durable state).
+
+### B20. The call graph is agent tools, not an RRF leg — and ships after the agent
+*(The core decision held and shipped in M8. Two details were superseded when it was built:
+the two tools became one — B25 — and the ambiguous 0.3 tier was dropped rather than filtered
+— B24.)*
+**Chose:** fusion stays lexical + semantic. The graph is exposed as `list_dependencies`,
+`get_callees`, `get_callers` — one hop per call, each edge carrying a resolution confidence
+(same file 0.9 → imported file 0.85 → unique name 0.7 → ambiguous 0.3) so tools can filter
+the ambiguous tail. The agent, not a fixed pipeline, decides when to hop. **Alternative:**
+the B17 seeded third leg; or a LARGER-style sidecar that attaches 1-hop neighbours to each
+`/search` hit (deferred until the agent eval shows a need). **Why:** RRF combines independent
+relevance estimates; hop distance is a property of the seed, not the query, and a seeded leg
+can only amplify the other two. Whether a neighbour matters depends on the question — zero
+hops for "where is X defined", several for "how does auth flow" — which only an agent can
+judge per query. The field agrees: LARGER attaches neighbours to the anchoring hit and never
+re-ranks; RepoGraph found 1-hop best and 2-hop worst; LocAgent's `TraverseGraph` tool is
+worth +4 pts next to keyword search's +13; Augment keeps its call graph as a "structural
+reachability" index beside BM25 and vectors; GraphRAG-Bench shows graphs *lose* on simple
+lookups. Honest scope: keyword search already finds a name's call sites, so `get_callers`
+mostly adds the enclosing caller; `get_callees` is the genuinely new capability. **Order:**
+agent first (M7) with the tools that already exist, because the graph's value can only be
+measured inside the loop — tools on vs. off on the agent eval (M8). What changes the answer:
+the agent eval showing the conceptual bucket still failing on multi-hop questions with the
+tools present — that's the trigger for the sidecar, or for a real reranker.
+
+### B21. Simple loop + mechanical guards, over router and grader nodes
+**Chose:** one `call_model ↔ tools` loop; off-topic handled by a system-prompt rule; empty
+results return a steering message; an identical repeat call is blocked; a hard tool budget
+forces an answer; a regex citation verifier runs before `END`. No extra LLM calls per turn.
+**Alternative:** the original M7 sketch — a router node (on/off-topic classifier) before the
+loop and a CRAG-style grader node after every tool call. **Why:** in a tool-calling loop the
+model already sees each result and decides whether to search again, so a grader re-decides
+what the next `call_model` decides anyway; and both router branches end in the same model
+call. arXiv 2608.01507 (repo-level code QA, 4 models × 15 repos): plain search+read loop
+65 % pass vs. orchestrator/sub-agents 46 %, at half the cost per correct answer, with tool
+calls beyond need correlating negatively with correctness. Cursor, Claude Code, Copilot and
+SWE-grep all run the plain loop. **Revisit triggers:** router — the eval or real use shows
+tool calls on off-topic questions or refusals on on-topic ones; grader — many turns with
+`retrieved` true but `cited` false (the model saw the answer and still re-searched or
+answered from junk); reranker — retrieval `recall@5` stalls while `@20` stays high;
+retrieval sub-agent — main-model context blowing up on large repos. Each is a small graph
+change measurable in a day with the `eval.agent` flags.
+
+### B22. Own `chat_conversation`/`chat_message` tables over a LangGraph checkpointer
+**Chose:** persist only user questions and final assistant answers (with verified citations
+and the tool trace for the UI); rebuild each turn's prompt as system + map + last 12 of those
++ the new question. **Alternative:** `PostgresSaver` keyed by `thread_id`, which snapshots
+the whole graph state after every step. **Why:** the checkpointer replays every previous
+turn's tool outputs — turn 3 carries turns 1–2's file reads (~12k tokens vs ~3k) — which is
+exactly the "tool result clearing" Anthropic recommends against keeping; the UI's
+conversation list and history are ordinary SQL on our rows, ownership-scoped like every
+other read, instead of filtering checkpoint blobs; and the checkpointer's real strengths
+(resume a crashed run mid-step, human-in-the-loop, time travel) aren't needed for a
+few-second chat turn. `END` ends a turn, not the conversation — the next message re-invokes
+the graph with the stored history. **What changes the answer:** a turn that can be
+interrupted and resumed (human approval before a tool runs), which is the moment to add a
+checkpointer without touching the graph code.
+
+### B23. `gpt-5.4-mini` as the default chat model
+**Chose:** `gpt-5.4-mini` ($0.75 / $4.50 per M tokens). **Alternative:** `gpt-4.1-mini`
+(half the price), or the original `gpt-4o-mini`. **Why:** measured on the agent eval,
+46 questions: cited 0.91 vs 0.59 for 4.1-mini, fewer tool calls (3.3 vs 3.8), and
+faster (4 s vs 7 s per question). Per question that is ~1 ¢ vs ~0.5 ¢. Caveat: most of
+4.1-mini's gap is citation *format* — it found the code but wrote "lines 90-99" instead of
+`[path:90-99]`, which the verifier rejects. Still a product failure (no clickable link),
+but a fairer comparison needs the verifier to accept bare `path:a-b` first. Config-only switch
+(`OPENAI_CHAT_MODEL`); `--model` on `eval.agent` re-runs the comparison.
+
+### B24. Precision over recall in call resolution — no ambiguous tier at all
+**Chose:** resolve a call name in tiers — same file (0.9), exactly one imported file (0.85),
+unique repo-wide (0.7) — and write **nothing** when a tier matches more than one candidate.
+No fall-through to a weaker tier either: a name defined twice in the calling file is not
+better explained by a match in a distant one. `self.foo()` stops at the current file (a
+missing match means inheritance, which name matching cannot follow), and `x.foo()` is denied
+the repo-wide tier entirely, because for a bare `foo()` the language's scoping rules mean the
+name had to be imported or local, whereas `x` could be any object at all and a same-named
+repo function is a coincidence.
+**Alternative:** the original `DATA_MODEL.md` spec — emit one row per candidate at
+confidence 0.3 and let tools filter at `>= 0.5`. **Why:** those rows would have been written,
+indexed, and never read by anything — dead data with a maintenance cost. More importantly the
+asymmetry runs one way: a wrong edge sends the agent to unrelated code and it answers from
+there; a missing edge only leaves it searching, which it is already good at. ARISE
+(arXiv 2605.03117) states it directly — "spurious call edges lead agents down incorrect paths
+and are more harmful than missing edges" — and resolves only unambiguous direct and qualified
+calls for the same reason. **Measured:** on `requests`, where `request` is defined twice
+(`api.py` module function and `Session.request`), all 19 resolved edges point at the correct
+one; `self.request()` inside `sessions.py` never leaks to `api.py`. Recall cost is real and
+visible: a module-level call (`export const parse = _parse(Err)`) has no enclosing entity and
+is dropped, which caps one zod eval question at `ccov` 0.67. **What changes the answer:**
+making `reference_edge.from_entity_id` nullable would recover module-level call sites — worth
+it if TypeScript repos become a priority, since `const x = f()` is idiomatic there and rare in
+Python. Type inference (or an LSP, B26) would remove the ambiguity rather than dropping it.
+
+### B25. One `find_references(symbol, direction)` tool, not `get_callers` + `get_callees`
+**Chose:** a single tool with a `direction: "callers" | "callees"` parameter, mirroring the
+existing `list_dependencies(path, direction)` that the model already uses correctly.
+**Alternative:** the two separate tools the docs originally specified. **Why:** every tool
+schema is permanent weight in the cached prompt prefix and one more bullet in the tool
+guidance, and the two directions share their entire implementation — the query differs by
+which side of the edge is joined. LocAgent (`TraverseGraph`) and ARISE (`traverse_relations`)
+both collapse direction into a parameter rather than multiplying tools. The counter-argument
+is real — separate names are more discoverable to the model — but `list_dependencies` is
+existing proof in this codebase that the parameterised shape gets called correctly.
+**What changes the answer:** eval traces showing the model picking the wrong `direction`, or
+never trying `callees`. That is a one-run A/B on `eval.agent` if it comes up.
+
+### B26. Tree-sitter name matching over LSP/SCIP precise resolution
+**Chose:** the "poor man's call graph" — Tree-sitter extracts call sites, names are matched
+against the symbol table in confidence tiers, no type inference. **Alternative:** compiler-
+accurate resolution: SCIP (Sourcegraph), stack-graphs (GitHub), or a live language server
+behind the tool the way Serena's `find_referencing_symbols` does it. **Why:** every precise
+option needs either a build or a per-repo language server. Noetra clones arbitrary repositories
+into a container with no dependencies installed — `pyright` or `tsserver` would need a venv or
+`node_modules` per repo, would add minutes per import, and would fail outright on a large share
+of them. Syntactic maps are cheap, local, and work on a repo that does not build, which is a
+meaningful fraction of what users import; they trade exactness for coverage. The trade is
+visible and bounded: the graph is approximate on purpose, because its only job is to orient an
+agent that then reads the real file. **What changes the answer:** measured edge precision
+falling below ~0.8, or a user base concentrated in one language where a single language server
+is worth operating. The upgrade path with the best fit is **stack-graphs** — it is the one
+precise design that needs no build step, being a declarative name-binding DSL layered on the
+Tree-sitter grammars we already use — at the cost of writing that DSL per language.
+
+### B27. The graph is a capability, not an improvement — so it needed its own question bucket
+**Chose:** measure `find_references` on a purpose-built `graph` bucket (n=12) and treat the
+original 46 purely as a no-regression guard. **Alternative:** the plan of record — judge it on
+the existing 46. **Why:** the two produce opposite conclusions. On the 46 the tool moves
+nothing (`cited` 0.91 → 0.89, one question of variance) because those questions ask "where is
+X" or "how does Y work", which one `code_search` answers; on the graph bucket it moves
+`ccov` **0.63 → 0.84** while cutting tool calls 28 % and tokens 30 %. Judged on the 46 alone
+the correct decision would have been to delete it. This is the general shape of evaluating a
+feature that *adds* a capability rather than *improving* an existing one: an aggregate metric
+averages the new capability away, and the honest report is per-bucket. It also matches what
+the literature finds — Codebase-Memory (31 repos) scored graph tooling *below* a file-exploring
+agent on general QA (83 % vs 92 %) while matching or beating it on graph-native queries at 10×
+fewer tokens, and LocAgent measured removing its graph tool at −4 points against −13 for
+removing keyword search. The graph is real and second-order. **What changes the answer:**
+nothing about the method; the bucket is n=12, so individual sub-rows (`requests`, n=4) are
+noise and only the headline delta should be quoted.

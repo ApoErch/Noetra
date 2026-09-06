@@ -12,9 +12,9 @@ from sqlalchemy.orm import Session
 
 from core.db import SessionLocal
 from core.models import File
-from core.retrieval import search
+from core.retrieval import ALL_LEGS, search
 from core.retrieval.types import RetrieverSource
-from eval.repos import EVAL_REPOS_BY_KEY
+from eval.repos import EVAL_REPOS_BY_KEY, select_repos
 from eval.seed import eval_id
 
 _LEG_NAMES = {"lexical": RetrieverSource.LEXICAL, "semantic": RetrieverSource.SEMANTIC}
@@ -43,6 +43,14 @@ class QuestionKind(str, enum.Enum):
     SYMBOL = "symbol"  # names an identifier that exists verbatim; lexical's job too, just a distinct shape of query
     KEYWORD = "keyword"  # words that literally appear in the source; lexical's job
     CONCEPTUAL = "conceptual"  # the user's words appear nowhere in the code; only embeddings can help
+    # Enumeration questions ("every caller of X", "what does Y invoke") whose answer is a
+    # SET of locations, not one. They exist because the M7 agent eval saturated at 0.91 with
+    # ~1 question of real headroom, and none of the other kinds can move: code_search caps at
+    # MAX_CHUNKS_PER_FILE=2 (core/retrieval/types.py), so "list every call site in this file"
+    # is out of reach of the current tools by construction, not by ranking. Scored on
+    # coverage of the whole key in eval/agent.py, not on a single overlap — this is the
+    # bucket M8's graph tools are measured on, tools on vs. off.
+    GRAPH = "graph"
     # A guard-rail bucket, not a retrieval target: the answer genuinely lives in prose
     # (README, docs page), so these fail if the non-source rank penalty in
     # core/retrieval/lexical.py is tuned so hard that documentation stops surfacing at all.
@@ -208,9 +216,24 @@ def report(results: list[QuestionResult]) -> None:
         print(f"  [{result.question.kind.value}/{result.question.repo}] {result.question.query}{wrong_line}")
 
 
-def run(questions_path: Path = _QUESTIONS_PATH, legs: tuple[RetrieverSource, ...] | None = None) -> None:
-    """Score every pinned question against the seeded repos and print the scoreboard."""
-    questions = load_questions(questions_path)
+def run(
+    questions_path: Path = _QUESTIONS_PATH,
+    legs: tuple[RetrieverSource, ...] | None = None,
+    repos: str | None = None,
+) -> None:
+    """Score the pinned questions for the selected repos (default: noetra) and print the scoreboard."""
+    selected = {repo.key for repo in select_repos(repos)}
+    # `kind: graph` questions are deliberately not scored here. They are answered by the
+    # agent's graph tools walking call edges, never by search() — RRF has no graph leg and
+    # is not getting one (docs/RETRIEVAL.md). Letting them in would drag this scoreboard
+    # below its pinned 0.85/0.91 baseline for a reason that has nothing to do with
+    # retrieval quality, and break comparability with every earlier run. They are scored
+    # in eval/agent.py, on coverage.
+    questions = [
+        q
+        for q in load_questions(questions_path)
+        if q.repo in selected and q.kind is not QuestionKind.GRAPH
+    ]
     db = SessionLocal()
     try:
         problems = validate_answers(db, questions)
@@ -224,20 +247,25 @@ def run(questions_path: Path = _QUESTIONS_PATH, legs: tuple[RetrieverSource, ...
     finally:
         db.close()
 
-    ran = [leg.value for leg in legs] if legs is not None else [leg.value for leg in RetrieverSource]
+    ran = [leg.value for leg in (legs if legs is not None else ALL_LEGS)]
     print(f"legs: {', '.join(ran)}")
+    print(f"repos: {', '.join(sorted(selected))}")
+    print("kinds: symbol, keyword, conceptual, docs (graph questions are scored by eval.agent)")
     report(results)
 
 
 def main() -> None:
-    """CLI entry point: `python -m eval.run [--questions PATH] [--legs lexical,semantic]`."""
+    """CLI entry point: `python -m eval.run [--questions PATH] [--legs lexical,semantic] [--repos noetra|all]`."""
     parser = argparse.ArgumentParser(description="Score retrieval against the pinned eval questions.")
     parser.add_argument("--questions", type=Path, default=_QUESTIONS_PATH, help="path to questions.yaml")
     parser.add_argument(
         "--legs", type=str, default=None, help="comma-separated legs to run, e.g. lexical or lexical,semantic (default: both)"
     )
+    parser.add_argument(
+        "--repos", type=str, default=None, help="comma-separated repo keys, or 'all' (default: noetra)"
+    )
     args = parser.parse_args()
-    run(args.questions, parse_legs(args.legs))
+    run(args.questions, parse_legs(args.legs), args.repos)
 
 
 if __name__ == "__main__":

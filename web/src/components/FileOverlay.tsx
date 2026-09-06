@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiFetch } from '../lib/api'
 import { FileViewer, type FileContent } from './FileViewer'
-import type { ViewerTarget } from '../lib/search'
+import type { ViewerTarget } from '../lib/chat'
 
 type Props = {
   repoId: string
@@ -10,7 +10,7 @@ type Props = {
   onClose: () => void
 }
 
-/** Modal file viewer layered over the search UI, so following a citation never loses the results behind it. */
+/** Modal file viewer layered over the chat, so following a citation never loses the conversation behind it. */
 export function FileOverlay({ repoId, target, onClose }: Props) {
   const { data: fileContent, isLoading } = useQuery<FileContent>({
     queryKey: ['file', repoId, target.fileId],

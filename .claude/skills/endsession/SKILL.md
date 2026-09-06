@@ -1,6 +1,6 @@
 ---
 name: endsession
-description: Wrap up and hand off the current Noetra work session. Use when the user types /endsession, or says "end session", "wrap up", "close out for today", or "let's stop here". Writes a concise handoff into docs/SESSION_LOG.md so the next session has context, adds a docs/LEARNING_LOG.md entry if a milestone finished, records anything new-to-the-user in docs/CONCEPTS.md, then tells the user it's safe to run /clear.
+description: Wrap up and hand off the current Noetra work session. Use when the user types /endsession, or says "end session", "wrap up", "close out for today", or "let's stop here". Writes a concise handoff into docs/SESSION_LOG.md so the next session has context, adds a docs/LEARNING_LOG.md entry if a milestone finished, records any problem hit and solved (or design decision made) this session in docs/CONCEPTS.md, then tells the user it's safe to run /clear.
 allowed-tools: Read, Edit, Write, Bash
 ---
 
@@ -39,14 +39,24 @@ that file (Built / Core concept(s) / Recruiter-ready explanation / Tricky part).
 the new entry **above** the `<!-- Add new entries above this line -->` marker.
 **If no milestone finished, skip this step — do not invent one.**
 
-## 4. Update `docs/CONCEPTS.md` — for anything that was new to the user this session
+## 4. Update `docs/CONCEPTS.md` — for problems hit and decisions made this session
 
-This is the user's personal glossary. For each concept that was new to them (the
-auth / infra / retrieval / distributed-systems kind of thing that CLAUDE.md says to
-explain), add an entry in that file's existing format:
-**What it is / Why we need it here / How it's used in Noetra / Is this standard? /
-Docs (official link).** Plain language, with a concrete example. If nothing new came
-up, skip this step.
+This is the user's interview file, not a glossary: **no entries for concepts that were
+merely explained.** Only two kinds of entry exist, and each goes at the end of its section
+with the next sequential number:
+
+- **Section A — a problem we actually hit and solved** (a bug, a wrong assumption, a
+  measurement that surprised us). Format, four labelled lines:
+  **Problem:** what broke or what the number said · **Why:** the real cause ·
+  **Name:** what this failure is called in general, so it can be looked up ·
+  **How we solved it:** the fix, including what was measured to confirm it.
+- **Section B — a design decision with a real alternative** (a library, an architecture
+  shape, a constant set by measurement). Format, three labelled parts:
+  **Chose:** · **Alternative:** · **Why:** why ours wins *here*, and what would change
+  the answer.
+
+Keep each entry to roughly 8–15 lines, plain language, numbers where we have them. If
+nothing in the session qualifies, skip this step — do not pad the file.
 
 ## 5. Confirm, then hand off
 
@@ -60,5 +70,5 @@ Print a 3–4 line summary: what you wrote and to which files. Then tell the use
 - Never delete or rewrite existing entries in these files — only append/insert.
 - If a doc file is missing, create it (for LEARNING_LOG.md and CONCEPTS.md, add the same
   header/format block the originals use).
-- Keep SESSION_LOG.md entries short. LEARNING_LOG.md and CONCEPTS.md can be fuller, but
-  still plain-language.
+- Keep SESSION_LOG.md entries short. LEARNING_LOG.md can be fuller; CONCEPTS.md entries
+  stay tight — they're meant to be scanned before an interview.

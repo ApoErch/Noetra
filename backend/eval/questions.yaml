@@ -322,3 +322,133 @@
   kind: docs
   answers:
     - { path: "packages/docs/content/metadata.mdx", lines: [13, 35] }
+
+# ── kind: graph ───────────────────────────────────────────────────────────────────────
+# Enumeration questions: the answer is the WHOLE set of locations below, so eval/agent.py
+# scores these on coverage (rcov/ccov), not on a single overlap. They exist because the
+# other four kinds saturated at cited 0.91 with ~1 question of real headroom, and because
+# code_search physically cannot answer them: MAX_CHUNKS_PER_FILE = 2 caps it at two hits
+# per file, so "every call site in repos.py" is out of reach by construction. This is the
+# bucket M8's graph tools are measured on, tools on vs. off.
+#
+# Every noetra range below was read out of `git show 31fc158c:<path>` — the pinned SHA.
+
+- q: "If the signature of _get_owned_repository changed, every call site would have to change. List them all."
+  repo: noetra
+  kind: graph
+  answers:
+    - { path: "backend/api/repos.py", lines: [109, 109] }
+    - { path: "backend/api/repos.py", lines: [133, 133] }
+    - { path: "backend/api/repos.py", lines: [150, 150] }
+    - { path: "backend/api/repos.py", lines: [163, 163] }
+    - { path: "backend/api/repos.py", lines: [178, 178] }
+
+- q: "Everywhere the Redis index lock is acquired or released."
+  repo: noetra
+  kind: graph
+  answers:
+    - { path: "backend/api/repos.py", lines: [77, 77] }
+    - { path: "backend/api/repos.py", lines: [113, 113] }
+    - { path: "backend/worker/tasks.py", lines: [120, 120] }
+
+- q: "Which functions does the clone_repository task invoke, and where is each of them defined?"
+  repo: noetra
+  kind: graph
+  answers:
+    - { path: "backend/core/security.py", lines: [22, 24] }
+    - { path: "backend/worker/indexing.py", lines: [35, 35] }
+    - { path: "backend/core/redis_client.py", lines: [15, 15] }
+
+- q: "What does search() in core/retrieval call to produce its results, and where does each of those live?"
+  repo: noetra
+  kind: graph
+  answers:
+    - { path: "backend/core/retrieval/lexical.py", lines: [16, 16] }
+    - { path: "backend/core/retrieval/structural.py", lines: [10, 10] }
+    - { path: "backend/core/retrieval/fusion.py", lines: [15, 15] }
+
+- q: "Trace the path from the search HTTP endpoint down to the code that runs the Postgres full-text query."
+  repo: noetra
+  kind: graph
+  answers:
+    - { path: "backend/api/repos.py", lines: [171, 179] }
+    - { path: "backend/core/retrieval/__init__.py", lines: [13, 24] }
+    - { path: "backend/core/retrieval/lexical.py", lines: [16, 49] }
+
+- q: "Which helper functions does resolve_dependencies call, and where is each of them defined?"
+  repo: noetra
+  kind: graph
+  answers:
+    - { path: "backend/indexer/graph.py", lines: [26, 26] }
+    - { path: "backend/indexer/graph.py", lines: [43, 43] }
+    - { path: "backend/indexer/graph.py", lines: [78, 78] }
+
+# requests/zod graph ranges were read from the pinned blobs at their SHAs (eval/repos.py),
+# not from a branch tip. zod is included knowing it is the weak case: our TS extraction
+# only makes an entity out of `const x = () => {}`, so call sites sitting in a plain
+# `const x = f(y)` initialiser have no enclosing entity to attribute them to. Those
+# questions are expected to score below the Python repos, and the by-repo row is where
+# that gap is supposed to show — the tools-on/off ablation stays valid either way,
+# because both arms lose the same edges.
+
+- q: "Every function in the top-level requests API that delegates to request()."
+  repo: requests
+  kind: graph
+  answers:
+    - { path: "src/requests/api.py", lines: [87, 87] }
+    - { path: "src/requests/api.py", lines: [99, 99] }
+    - { path: "src/requests/api.py", lines: [114, 114] }
+    - { path: "src/requests/api.py", lines: [134, 134] }
+    - { path: "src/requests/api.py", lines: [151, 151] }
+    - { path: "src/requests/api.py", lines: [168, 168] }
+    - { path: "src/requests/api.py", lines: [180, 180] }
+
+- q: "Which prepare_* steps does PreparedRequest.prepare run, and where is each one implemented?"
+  repo: requests
+  kind: graph
+  answers:
+    - { path: "src/requests/models.py", lines: [467, 467] }
+    - { path: "src/requests/models.py", lines: [483, 483] }
+    - { path: "src/requests/models.py", lines: [565, 565] }
+    - { path: "src/requests/models.py", lines: [576, 576] }
+    - { path: "src/requests/models.py", lines: [670, 670] }
+    - { path: "src/requests/models.py", lines: [699, 699] }
+    - { path: "src/requests/models.py", lines: [722, 722] }
+
+- q: "Trace what happens when requests.get() is called, from the top-level helper down to the adapter that sends it."
+  repo: requests
+  kind: graph
+  answers:
+    - { path: "src/requests/api.py", lines: [74, 87] }
+    - { path: "src/requests/api.py", lines: [24, 71] }
+    - { path: "src/requests/sessions.py", lines: [557, 651] }
+    - { path: "src/requests/sessions.py", lines: [752, 752] }
+    - { path: "src/requests/adapters.py", lines: [634, 634] }
+
+- q: "Which Session methods does Session.request call to build and dispatch a request?"
+  repo: requests
+  kind: graph
+  answers:
+    - { path: "src/requests/sessions.py", lines: [511, 511] }
+    - { path: "src/requests/sessions.py", lines: [831, 831] }
+    - { path: "src/requests/sessions.py", lines: [752, 752] }
+
+- q: "Everything that calls _parse or _parseAsync in zod's core parse module."
+  repo: zod
+  kind: graph
+  answers:
+    - { path: "packages/zod/src/v4/core/parse.ts", lines: [30, 30] }
+    - { path: "packages/zod/src/v4/core/parse.ts", lines: [51, 51] }
+    - { path: "packages/zod/src/v4/core/parse.ts", lines: [105, 105] }
+    - { path: "packages/zod/src/v4/core/parse.ts", lines: [117, 117] }
+    - { path: "packages/zod/src/v4/core/parse.ts", lines: [130, 130] }
+    - { path: "packages/zod/src/v4/core/parse.ts", lines: [142, 142] }
+
+- q: "Every place util.finalizeIssue is called."
+  repo: zod
+  kind: graph
+  answers:
+    - { path: "packages/zod/src/v4/core/parse.ts", lines: [23, 23] }
+    - { path: "packages/zod/src/v4/core/parse.ts", lines: [44, 44] }
+    - { path: "packages/zod/src/v4/core/parse.ts", lines: [69, 69] }
+    - { path: "packages/zod/src/v4/core/parse.ts", lines: [89, 89] }

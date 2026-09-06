@@ -9,9 +9,8 @@ host during dev — choose per component.
 - Python 3.11+ with `uv`  — backend
 - Node 20+ with pnpm — frontend
 - A GitHub OAuth app (Client ID + Secret)
-- A Google Gemini API key — used for both chat and embeddings. Free tier is enough;
-  get one at <https://aistudio.google.com/apikey>. Note the free-tier limits (roughly
-  15 RPM / 1,500 RPD on `gemini-3.5-flash`) — they're low enough to shape how you test.
+- An OpenAI API key — used for both embeddings and chat. Get one at
+  <https://platform.openai.com/api-keys>. Embedding the eval repos costs cents.
 
 ## Services (docker-compose)
 
@@ -42,11 +41,21 @@ GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 GITHUB_OAUTH_CALLBACK=http://localhost:8000/api/v1/auth/callback
 FRONTEND_URL=http://localhost:5173
-# ai — one provider, both uses; read only by core/ai
-GEMINI_API_KEY=
-GEMINI_CHAT_MODEL=gemini-3.5-flash
-GEMINI_EMBEDDING_MODEL=gemini-embedding-001
-GEMINI_EMBEDDING_DIMENSIONS=1536   # must match chunk.embedding's vector(N); changing it = full re-embed
+# ai — read only by core/ai. Embeddings + chat default to OpenAI; one key covers both.
+EMBEDDING_PROVIDER=openai          # only "openai" is implemented; the switch point for a future provider
+OPENAI_API_KEY=
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small   # 1536 dims — must match chunk.embedding vector(N); changing model = full re-embed
+OPENAI_CHAT_MODEL=gpt-5.4-mini
+AGENT_TOOL_BUDGET=8                # max tool calls per chat question
+AGENT_REPO_MAP_TOKENS=1500         # token budget for the repo map in the agent prompt
+DEFAULT_CHAT_PROVIDER=openai       # openai | anthropic
+ANTHROPIC_API_KEY=                 # only if testing the chat agent against Anthropic
+ANTHROPIC_CHAT_MODEL=claude-sonnet-5
+# langsmith tracing (optional; see "Tracing" below)
+LANGSMITH_TRACING=false
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=noetra
 # app
 SESSION_SECRET=
 TOKEN_ENCRYPTION_KEY=          # Fernet key: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -85,27 +94,45 @@ docker compose exec api alembic revision --autogenerate -m "msg"
 docker compose exec db psql -U noetra   # inspect the DB
 docker compose down -v                  # reset everything (drops volumes)
 
-# retrieval eval (the scoreboard — see RETRIEVAL.md)
-docker compose exec worker python -m eval.seed             # clone + index + embed the 3 pinned repos
+# retrieval eval (the scoreboard — see RETRIEVAL.md). Default repo is noetra.
+docker compose exec worker python -m eval.seed             # clone + index + embed noetra
 docker compose exec worker python -m eval.seed --force     # re-seed; MANDATORY after any
                                                            # chunker or embedding change
-docker compose exec worker python -m eval.seed --no-embed  # skip embedding — fast, for
+docker compose exec worker python -m eval.seed --no-embed  # skip embedding — for
                                                            # chunker-only iteration
+docker compose exec worker python -m eval.seed --repos all # all 3 pinned repos
 docker compose exec worker python -m eval.run              # recall@5 / recall@20 scoreboard
 docker compose exec worker python -m eval.run --legs lexical            # ablate a leg out
 docker compose exec worker python -m eval.run --legs lexical,semantic   # explicit, both
+docker compose exec worker python -m eval.run --repos noetra,requests   # more repos
+
+# agent eval (runs the real chat agent; ~1 cent per question; checkpointed per question)
+docker compose exec worker python -m eval.agent                       # baseline → eval/out/agent-baseline.jsonl
+docker compose exec worker python -m eval.agent --tag x --no-repo-map # ablation: no repo map
+docker compose exec worker python -m eval.agent --kinds graph --repos all      # the M8 bucket
+docker compose exec worker python -m eval.agent --kinds graph --no-graph-tools # ablation: no find_references
+docker compose exec worker python -m eval.agent --tag y --model gpt-4.1-mini   # model A/B
+docker compose exec worker python -m eval.agent --limit 3 --fresh     # smoke test, 3 questions
+
+# unit tests (pure — no DB, no LLM)
+cd backend && uv run pytest -q
 ```
 
 The eval runs in `worker`, not `api` — it needs `git`, the DB, and the `.env` file, and
 `worker` is the only service with all three. Chunks and embeddings are built at *index*
 time, not query time, so changing how either works means re-seeding before the numbers mean
-anything.
+anything. Embedding is resumable (`WHERE embedding IS NULL`), so an interrupted seed
+continues on the next run; `--no-embed` skips it when only the chunker changed.
 
-**`--force` is now a genuinely slow operation** (M6) — it re-embeds every chunk in all 3
-repos, and the free tier's embedding quota (100 requests/min, **1,000/day** — see
-`STACK.md`) makes this minutes, not seconds. It's resumable (safe to re-run the same command
-after a quota error — it picks up `WHERE embedding IS NULL`), and `--no-embed` skips the
-embedding step entirely when only the chunker changed and lexical-only numbers are enough.
+## Tracing (LangSmith)
+
+Set `LANGSMITH_TRACING=true` plus the key and project in `.env`, then
+`docker compose up -d --force-recreate api worker` (a restart does not re-read `.env`).
+Nothing else: `langchain-core` picks the variables up and records every chat turn as one
+trace named `agent_turn` — each `call_model`, each tool call with its arguments and result,
+token usage, and latency — tagged with `repository_id` in the metadata. The eval
+(`eval.agent`) is traced the same way, so a bad answer in the scoreboard can be opened and
+read step by step. Off by default; it adds a network call per span.
 
 ## Notes
 

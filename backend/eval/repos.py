@@ -36,3 +36,21 @@ EVAL_REPOS: list[EvalRepo] = [
 ]
 
 EVAL_REPOS_BY_KEY: dict[str, EvalRepo] = {repo.key: repo for repo in EVAL_REPOS}
+
+# What `--repos` means when omitted. Day-to-day runs are demonstrated on noetra alone;
+# `--repos all` (or an explicit list) brings the other two back in.
+DEFAULT_EVAL_REPOS: tuple[str, ...] = ("noetra",)
+
+
+def select_repos(raw: str | None) -> list[EvalRepo]:
+    """Resolve a `--repos` value: None → DEFAULT_EVAL_REPOS, "all" → every repo, else comma-separated keys."""
+    if raw is None:
+        keys: tuple[str, ...] = DEFAULT_EVAL_REPOS
+    elif raw.strip() == "all":
+        keys = tuple(EVAL_REPOS_BY_KEY)
+    else:
+        keys = tuple(k.strip() for k in raw.split(","))
+    unknown = [k for k in keys if k not in EVAL_REPOS_BY_KEY]
+    if unknown:
+        raise ValueError(f"unknown repo(s) {unknown} — choose from {sorted(EVAL_REPOS_BY_KEY)} or 'all'")
+    return [EVAL_REPOS_BY_KEY[k] for k in keys]

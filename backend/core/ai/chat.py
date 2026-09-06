@@ -1,6 +1,7 @@
 from functools import lru_cache
 
 from langchain_core.language_models.chat_models import BaseChatModel
+from pydantic import SecretStr
 
 from core.config import get_settings
 
@@ -16,17 +17,21 @@ def get_chat_model(provider: str | None = None) -> BaseChatModel:
     settings = get_settings()
     provider = provider or settings.default_chat_provider
 
-    if provider == "gemini":
-        from langchain_google_genai import ChatGoogleGenerativeAI
-
-        return ChatGoogleGenerativeAI(model=settings.gemini_chat_model, api_key=settings.gemini_api_key)
     if provider == "openai":
         from langchain_openai import ChatOpenAI
 
-        return ChatOpenAI(model=settings.openai_chat_model, api_key=settings.openai_api_key)
+        return ChatOpenAI(model=settings.openai_chat_model, api_key=SecretStr(settings.openai_api_key))
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
-        return ChatAnthropic(model=settings.anthropic_chat_model, api_key=settings.anthropic_api_key)
+        # `model_name` is the field's declared name (`model` is a runtime-only alias), and
+        # `timeout`/`stop` are required by the typed signature — LangChain's own docs pass
+        # them as None too.
+        return ChatAnthropic(
+            model_name=settings.anthropic_chat_model,
+            api_key=SecretStr(settings.anthropic_api_key),
+            timeout=None,
+            stop=None,
+        )
 
     raise ValueError(f"unknown chat provider: {provider!r}")

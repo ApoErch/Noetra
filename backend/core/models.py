@@ -1,12 +1,14 @@
 import enum
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     Computed,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -17,7 +19,7 @@ from sqlalchemy import (
 )
 from sqlalchemy import Enum as SAEnum
 from pgvector.sqlalchemy import Vector
-from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
@@ -150,7 +152,7 @@ class Chunk(Base):
     produces one per leaf entity plus gap chunks for everything between them.
 
     `embedding` is nullable on purpose: the M6 embedding stage selects
-    `WHERE embedding IS NULL`, so a 429 partway through a repo resumes instead of
+    `WHERE embedding IS NULL`, so a failure partway through a repo resumes instead of
     restarting, and a repo stuck mid-embed stays lexically searchable throughout.
     """
 
@@ -180,8 +182,9 @@ class Chunk(Base):
         Computed("to_tsvector('english', coalesce(embed_text, ''))", persisted=True),
         nullable=True,
     )
-    # 1536 = gemini-embedding-001 truncated from its native 3072 (Matryoshka) — pgvector's
-    # HNSW index caps the `vector` type at 2000 dims, and 3072 would force `halfvec`.
+    # 1536 = text-embedding-3-small's native size (also under pgvector's 2000-dim cap for
+    # indexing the plain `vector` type, should an ANN index ever be added). Changing the
+    # embedding model means a migration here plus a full re-embed.
     # Explicit Vector(1536) type means the `list[float] | None` annotation is never
     # consulted, so no `type_annotation_map` entry or `# type: ignore` is needed.
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
@@ -216,4 +219,86 @@ class DependencyEdge(Base):
     kind: Mapped[DependencyKind] = mapped_column(
         SAEnum(DependencyKind, name="dependency_kind"), default=DependencyKind.IMPORT
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReferenceEdge(Base):
+    """One resolved call: `from_entity` calls `to_entity`, both within the same repo (see docs/DATA_MODEL.md).
+
+    Distinct from `DependencyEdge`, which is file -> file ("does a.py import b.py"); this is
+    entity -> entity ("does handler() call decrypt_token()"). Powers the agent's
+    `find_references` tool. Never a fused retrieval leg — see docs/RETRIEVAL.md.
+
+    `confidence` records which resolution tier produced the edge (0.9 same file, 0.85 a file
+    this one imports, 0.7 a unique repo-wide name). There is deliberately no ambiguous tier:
+    `indexer.calls.resolve_calls` writes nothing rather than a row per candidate, because a
+    wrong edge sends the agent to unrelated code while a missing one only leaves it
+    searching. Same dedupe-before-insert discipline as DependencyEdge, so no unique
+    constraint.
+    """
+
+    __tablename__ = "reference_edges"
+    # get_callers is the direction that needs an index: "who calls this entity" scans by
+    # target, where get_callees is already covered by the from_entity_id foreign key.
+    __table_args__ = (Index("ix_reference_edges_repository_id_to_entity_id", "repository_id", "to_entity_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), index=True
+    )
+    from_entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("code_entities.id", ondelete="CASCADE"), index=True
+    )
+    to_entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("code_entities.id", ondelete="CASCADE")
+    )
+    line: Mapped[int] = mapped_column(Integer)  # the call site, so a citation can point at it
+    confidence: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ChatConversation(Base):
+    """One chat thread between a user and one repository — the unit the chat UI lists and the agent's memory is scoped to."""
+
+    __tablename__ = "chat_conversations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String, default="New chat")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ChatRole(str, enum.Enum):
+    """Who wrote a chat message. Tool calls are never stored as messages — only in `ChatMessage.tool_trace`."""
+
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class ChatMessage(Base):
+    """One user question or one final assistant answer (with its verified citations and the tool steps behind it).
+
+    Only these two roles are stored and replayed as history — never the tool results the
+    agent read along the way. That is what keeps each turn's prompt small (docs/RETRIEVAL.md,
+    memory section). `tool_trace` exists for the UI's "steps" block, not for the model.
+    """
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_conversations.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[ChatRole] = mapped_column(SAEnum(ChatRole, name="chat_role"))
+    content: Mapped[str] = mapped_column(Text)
+    # list of RetrievalHit dicts (assistant only); null for user messages
+    citations: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    # list of {name, args, summary} (assistant only)
+    tool_trace: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
