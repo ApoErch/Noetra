@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { API_URL, apiFetch } from './lib/api'
 import { RepoList } from './components/RepoList'
@@ -12,9 +12,23 @@ type Me = {
   avatar_url: string | null
 }
 
+/** Which repo id (if any) the URL says is open — read on mount and after back/forward. */
+function repoIdFromLocation(): string | null {
+  return new URLSearchParams(window.location.search).get('repo')
+}
+
 function App() {
   const queryClient = useQueryClient()
-  const [openRepo, setOpenRepo] = useState<Repo | null>(null)
+  // Which repo is open lives in the URL (`?repo=<id>`), not just React state — otherwise a
+  // page refresh loses the open repo and drops the user back at the repo list, since state
+  // resets but the component tree still has to render *something* on the very first paint.
+  const [openRepoId, setOpenRepoId] = useState<string | null>(() => repoIdFromLocation())
+
+  useEffect(() => {
+    const onPopState = () => setOpenRepoId(repoIdFromLocation())
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
 
   const { data: me, isLoading } = useQuery<Me | null>({
     queryKey: ['me'],
@@ -27,6 +41,36 @@ function App() {
     },
   })
 
+  // Same list RepoList shows (same query key, so opening a repo from there needs no extra
+  // request) — also what resolves `openRepoId` back into a `Repo` after a refresh, since
+  // there's no GET /repos/{id} and the list already has everything an open repo needs.
+  const { data: repos } = useQuery<Repo[]>({
+    queryKey: ['repos'],
+    queryFn: () => apiFetch<Repo[]>('/api/v1/repos'),
+    enabled: Boolean(me) && openRepoId !== null,
+  })
+
+  const openRepo = repos?.find((r) => r.id === openRepoId) ?? null
+
+  // A repo id in the URL that doesn't resolve (deleted, or a stale/shared link) falls back to
+  // the list instead of getting stuck on a permanent loading screen.
+  useEffect(() => {
+    if (openRepoId && repos && !openRepo) {
+      setOpenRepoId(null)
+      window.history.replaceState(null, '', window.location.pathname)
+    }
+  }, [openRepoId, repos, openRepo])
+
+  const openRepoAndNavigate = (repo: Repo) => {
+    setOpenRepoId(repo.id)
+    window.history.pushState(null, '', `?repo=${repo.id}`)
+  }
+
+  const closeRepo = () => {
+    setOpenRepoId(null)
+    window.history.pushState(null, '', window.location.pathname)
+  }
+
   const logout = useMutation({
     mutationFn: () => apiFetch('/api/v1/auth/logout', { method: 'POST' }),
     onSuccess: () => {
@@ -34,7 +78,7 @@ function App() {
       // belong to the user who just left, and the next login in this tab would render them
       // before its own fetches land.
       queryClient.clear()
-      setOpenRepo(null)
+      closeRepo()
     },
   })
 
@@ -67,8 +111,17 @@ function App() {
     )
   }
 
-  if (openRepo) {
-    return <RepoExplorer repo={openRepo} onBack={() => setOpenRepo(null)} />
+  if (openRepoId) {
+    // Resolving which repo `openRepoId` refers to (fresh page load with a repo already in the
+    // URL) — a beat before `repos` lands, not the repo list flashing in behind it.
+    if (!openRepo) {
+      return (
+        <div className="flex min-h-screen items-center justify-center bg-zinc-950">
+          <p className="text-sm text-zinc-500">Loading…</p>
+        </div>
+      )
+    }
+    return <RepoExplorer repo={openRepo} onBack={closeRepo} />
   }
 
   return (
@@ -93,7 +146,7 @@ function App() {
           </div>
         </div>
       </header>
-      <RepoList onOpen={setOpenRepo} />
+      <RepoList onOpen={openRepoAndNavigate} />
     </div>
   )
 }

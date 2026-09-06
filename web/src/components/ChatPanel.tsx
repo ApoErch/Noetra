@@ -112,7 +112,7 @@ export function ChatPanel({ repoId, onOpenCitation, activeId, onActiveIdChange }
   return (
     <div className="flex h-full">
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
+        <div className="flex-1 space-y-7 overflow-y-auto px-8 py-6">
           {messages.length === 0 && !pendingUser && (
             <div className="mt-16 text-center text-sm text-zinc-500">
               <p className="text-zinc-300">Ask anything about this repository.</p>
@@ -142,29 +142,38 @@ export function ChatPanel({ repoId, onOpenCitation, activeId, onActiveIdChange }
               onOpenCitation={onOpenCitation}
             />
           )}
-          {error && <p className="rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</p>}
+          {error && <p className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</p>}
           <div ref={bottomRef} />
         </div>
 
-        <form onSubmit={send} className="border-t border-zinc-800 px-6 py-4">
-          <div className="flex gap-2">
+        <form onSubmit={send} className="border-t border-zinc-800 px-8 py-5">
+          <div className="flex gap-3">
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Ask about this codebase…"
               disabled={busy}
-              className="flex-1 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500 focus:outline-none disabled:opacity-50"
+              className="flex-1 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-[15px] text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500 focus:outline-none disabled:opacity-50"
             />
             <button
               type="submit"
               disabled={busy || input.trim().length === 0}
-              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-30"
+              className="flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-30"
             >
+              <SendIcon />
               {busy ? 'Answering…' : 'Send'}
             </button>
           </div>
         </form>
       </div>
     </div>
+  )
+}
+
+function SendIcon() {
+  return (
+    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-current">
+      <path d="M15.44.29a.75.75 0 0 1 .225.809l-4.5 14.25a.75.75 0 0 1-1.37.113L7.06 9.94.328 8.198a.75.75 0 0 1 .113-1.371l14.25-4.5a.75.75 0 0 1 .75.963ZM8.31 8.94l2.32 4.176L13.977 2.98 8.31 8.94Zm4.71-6.917L2.98 6.023l4.176 2.32 5.864-5.864Z" />
+    </svg>
   )
 }

@@ -56,7 +56,7 @@ export function ConversationMenu({ repoId, activeId, onSelect }: Props) {
 
   const items = conversations ?? []
   const active = items.find((conv) => conv.id === activeId)
-  const label = active ? active.title : 'New conversation'
+  const label = active ? active.title : 'Chats'
 
   return (
     <div ref={containerRef} className="relative">
@@ -66,10 +66,10 @@ export function ConversationMenu({ repoId, activeId, onSelect }: Props) {
         aria-haspopup="menu"
         aria-expanded={open}
         title={label}
-        className="flex max-w-56 items-center gap-1.5 rounded-md border border-zinc-800 px-2.5 py-1 text-sm text-zinc-300 transition hover:bg-zinc-900 hover:text-white"
+        className="flex max-w-56 items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-indigo-500"
       >
         <span className="truncate">{label}</span>
-        <svg viewBox="0 0 16 16" className="h-3 w-3 shrink-0 fill-current text-zinc-500">
+        <svg viewBox="0 0 16 16" className="h-3 w-3 shrink-0 fill-current text-white/70">
           <path d="M4 6l4 4 4-4z" />
         </svg>
       </button>

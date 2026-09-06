@@ -13,8 +13,13 @@ import { displayName, type Repo } from '../lib/repos'
 type SelectedFile = Extract<TreeNode, { type: 'file' }>
 type Tab = 'chat' | 'dashboard'
 
+type Props = {
+  repo: Repo
+  onBack: () => void
+}
+
 /** Repo workspace: chat or dashboard in the main area, file tree in the sidebar, files opened as an overlay. */
-export function RepoExplorer({ repo, onBack }: { repo: Repo; onBack: () => void }) {
+export function RepoExplorer({ repo, onBack }: Props) {
   // A single target drives the overlay, whether the file was opened from the tree (no
   // highlight) or by following a citation (highlighted range). One piece of state means the
   // two paths can never disagree about what's on screen.
@@ -56,19 +61,19 @@ export function RepoExplorer({ repo, onBack }: { repo: Repo; onBack: () => void 
       {/* One toolbar spanning the full width, above everything. The workspace is a fixed
           h-screen column with the panels below scrolling inside it, so the header is pinned
           without needing `sticky` — nothing scrolls past it. */}
-      <header className="flex shrink-0 items-center gap-3 border-b border-zinc-800 bg-zinc-950 px-4 py-2.5">
+      <header className="flex shrink-0 items-center gap-4 border-b border-zinc-800 bg-zinc-950 px-6 py-4">
         <button
           onClick={onBack}
           title="Back to your repositories"
-          className="flex items-center gap-1.5 rounded-md px-1 py-0.5 transition hover:bg-zinc-800"
+          className="flex items-center gap-2 rounded-lg px-1.5 py-1 transition hover:bg-zinc-900"
         >
           <img src="/Logo.png" alt="Noetra" className="h-7 w-7 object-contain" />
-          <span className="font-semibold text-violet-400">Noetra</span>
+          <span className="text-lg font-semibold text-violet-400">Noetra</span>
         </button>
         <span className="text-zinc-700">/</span>
-        <span className="font-medium text-white">{displayName(repo.name)}</span>
+        <span className="text-base font-bold text-white">{displayName(repo.name)}</span>
 
-        <div className="ml-6 flex items-center gap-1">
+        <div className="ml-6 flex items-center gap-1.5">
           <TabButton active={tab === 'dashboard'} onClick={() => setTab('dashboard')}>
             Dashboard
           </TabButton>
@@ -80,14 +85,15 @@ export function RepoExplorer({ repo, onBack }: { repo: Repo; onBack: () => void 
         {/* Chat actions only while the Chat tab is showing — on the Dashboard they would be
             buttons that change nothing the user can see. */}
         {tab === 'chat' && (
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-3">
             <ConversationMenu repoId={repo.id} activeId={conversationId} onSelect={setConversationId} />
             <button
               type="button"
               onClick={() => setConversationId(null)}
-              className="rounded-md border border-zinc-800 px-2.5 py-1 text-sm text-zinc-300 transition hover:bg-zinc-900 hover:text-white"
+              className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-indigo-500"
             >
-              + New chat
+              <PlusIcon />
+              New chat
             </button>
           </div>
         )}
@@ -96,7 +102,7 @@ export function RepoExplorer({ repo, onBack }: { repo: Repo; onBack: () => void 
       <div className="flex flex-1 overflow-hidden">
         <div className="w-64 shrink-0 overflow-y-auto border-r border-zinc-800 bg-zinc-950">
           {isLoading ? (
-            <p className="px-4 py-3 text-sm text-zinc-500">Loading files…</p>
+            <p className="px-4 py-4 text-sm text-zinc-500">Loading files…</p>
           ) : (
             <FileTree nodes={tree} selectedFileId={target?.fileId ?? null} onSelectFile={openFromTree} />
           )}
@@ -127,11 +133,19 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
   return (
     <button
       onClick={onClick}
-      className={`rounded-md px-3 py-1 text-sm transition ${
+      className={`rounded-full px-4 py-1.5 text-sm transition ${
         active ? 'bg-zinc-800 font-medium text-white' : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
       }`}
     >
       {children}
     </button>
+  )
+}
+
+function PlusIcon() {
+  return (
+    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-current">
+      <path d="M8 1a1 1 0 0 1 1 1v5h5a1 1 0 1 1 0 2H9v5a1 1 0 1 1-2 0V9H2a1 1 0 1 1 0-2h5V2a1 1 0 0 1 1-1Z" />
+    </svg>
   )
 }
