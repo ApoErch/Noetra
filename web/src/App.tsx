@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { API_URL, apiFetch } from './lib/api'
-import { RepoList, type Repo } from './components/RepoList'
+import { RepoList } from './components/RepoList'
+import type { Repo } from './lib/repos'
 import { RepoExplorer } from './components/RepoExplorer'
 
 type Me = {
@@ -29,7 +30,10 @@ function App() {
   const logout = useMutation({
     mutationFn: () => apiFetch('/api/v1/auth/logout', { method: 'POST' }),
     onSuccess: () => {
-      queryClient.setQueryData(['me'], null)
+      // Clear the whole cache, not just ['me'] — repos, file trees and conversations all
+      // belong to the user who just left, and the next login in this tab would render them
+      // before its own fetches land.
+      queryClient.clear()
       setOpenRepo(null)
     },
   })
