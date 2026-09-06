@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     agent_repo_map_tokens: int = 1500
 
     session_secret: str = ""
+    # Session cookie lifetime and transport. Both were previously left to Starlette's
+    # defaults; they are explicit now because `https_only` must be True in any deployed
+    # environment and a silent default is the wrong place for that to live.
+    session_max_age_seconds: int = 60 * 60 * 24 * 14
+    session_https_only: bool = False
     token_encryption_key: str = ""
     clone_storage_dir: str = "/data/repos"
 

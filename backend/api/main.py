@@ -8,7 +8,18 @@ from api.repos import router as repos_router
 from core.config import get_settings
 
 app = FastAPI(title="Noetra API", version="0.1.0")
-app.add_middleware(SessionMiddleware, secret_key=get_settings().session_secret)
+# Every session option is passed explicitly rather than inherited from Starlette's defaults.
+# `same_site="lax"` is the default and is what the OAuth callback needs (GitHub redirects the
+# browser back with a top-level GET, which "strict" would strip the cookie from); `https_only`
+# has to be True wherever the app is served over TLS, which is why it is configuration and
+# not a constant.
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=get_settings().session_secret,
+    max_age=get_settings().session_max_age_seconds,
+    same_site="lax",
+    https_only=get_settings().session_https_only,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[get_settings().frontend_url],
