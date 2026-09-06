@@ -48,8 +48,10 @@ mechanical citation verifier, SSE chat UI; agent eval 42/46 cited on `gpt-5.4-mi
 `reference_edge` written by a second Tree-sitter walk, precision-first name resolution, and a
 single `find_references(symbol, direction)` tool. Measured on a new `graph` question kind
 (the old 46 were saturated and could not move — `CONCEPTS.md` A28): coverage **0.63 to 0.84**
-with 28% fewer tool calls and 30% fewer tokens. **Next up: M9 — metrics + dashboard**, the
-last milestone, which finally moves `status` to `READY`.
+with 28% fewer tool calls and 30% fewer tokens · **M9 metrics + dashboard — shipped
+2026-09-06**: a `metrics` pipeline stage writing `metric` rows, `GET /repos/{id}/metrics`, and
+a Dashboard tab in the repo workspace. `status` finally reaches `READY`, and the product now
+gates opening a repo on it (`CONCEPTS.md` B28). **V1 is complete.**
 
 Per-milestone writeups live in `LEARNING_LOG.md`.
 
@@ -126,7 +128,25 @@ Per-milestone writeups live in `LEARNING_LOG.md`.
      misdiagnosed as monorepo aliases. Fixed: 3 to 405 (`CONCEPTS.md` A30).
    - **Rejected on measurement:** reference-weighted repo-map PageRank (A31).
 
-9. **Basic metrics + dashboard.** `metrics` pipeline stage; status finally reaches `READY`.
+9. ~~**Basic metrics + dashboard.**~~ **Done — shipped 2026-09-06.** `worker/metrics.py` runs
+   five SQL aggregates into `metric` rows (jsonb, so a sixth key needs no migration) and sets
+   `status = READY` — the only place in the codebase that does. `GET /repos/{id}/metrics`
+   feeds a Dashboard tab beside Chat in the repo workspace: stat tiles, a share-of-lines
+   language bar, and a ranked largest-files list that clicks through to the Monaco overlay.
+   No enum migration was needed — `repository_status` has carried all nine values since
+   `002ecfb88441`.
+   - **What changed from the plan.** Opening a repo is now gated on `ready` rather than
+     unlocking progressively (`CONCEPTS.md` B28) — a product decision, not an API one: the
+     endpoints still gate on data, and `isOpenable()` is the single constant that reverses it.
+   - **Forced by that decision.** Every repo in the database sat at `embedding`, since
+     nothing had ever set `READY`, so all of them would have become unopenable. The fix is
+     the second restart path the milestone needed anyway: `resume_indexing` re-runs only the
+     pipeline's tail, where `retry` deletes everything and re-clones. Which one the UI offers
+     depends on the Redis index lock, because `status` alone cannot distinguish "embedding"
+     from "stopped while embedding".
+   - **Honest, not flattering.** `file.loc`/`file.language` exist only for parsed languages,
+     so three of the five metrics cover source files only and are labelled that way, with
+     `file_count` reporting total *and* source so the gap is visible.
 
 ## Two naming traps
 

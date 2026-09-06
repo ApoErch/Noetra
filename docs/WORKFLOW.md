@@ -29,21 +29,26 @@ Repository dashboard
 2. **Import** — user picks a repo. API creates `Repository`
    (`status=queued`) and enqueues a Celery job. Response is immediate.
 3. **Indexing** — runs in the worker (below); UI shows progress by stage.
-4. **Explore** — surfaces unlock progressively as the pipeline advances, not all at once
-   when it finishes:
-   - after `cloning` — the **file tree browser**. Needs only `file.path` / `file.content`,
-     which clone persists.
+4. **Explore** — the UI opens a repo at **`ready`**, and not before. Until then the card in
+   the repo list shows the stage it has reached, a step counter and a progress bar.
+
+   The *pipeline* still unlocks capabilities progressively, and the API still gates on data
+   rather than on `status` — that part is unchanged and is what the order below is for:
+   - after `cloning` — `GET /repos/{id}/files` can serve the **file tree**. Needs only
+     `file.path` / `file.content`, which clone persists.
    - after `chunking` — **lexical search**. `search()` runs over `chunk.content_tsv`, so it
      needs chunks to exist; the `tsvector` is a generated column, so there's no separate
-     index step once they do.
+     index step once they do. `api/chat.py` gates chat on exactly this (does the repo have
+     any chunks), never on `status`.
    - after `embedding` — **fused lexical + semantic search**.
-   - after `chunking` — **chat** too (the agent's `code_search` degrades to lexical-only
-     until embeddings exist — same `search()`).
-   - at `ready` — metrics.
+   - at `ready` — metrics, and the repo becomes openable.
 
-   This staging is the point of the pipeline order below. On a large repo the embedding
-   stage dominates wall-clock time; gating everything behind it would mean staring at a
-   progress bar for ten minutes before the product does anything.
+   **Why the product waits when the API wouldn't.** A workspace whose Dashboard tab is empty
+   and whose Chat tab answers "still indexing" is a worse experience than a disabled Open
+   button that says why. One completion state is easier to explain and easier to trust. The
+   cost is real and accepted: on a large repo the wait now includes the network-bound
+   embedding stage. `isOpenable()` in `web/src/lib/repos.ts` is the single place that decides
+   this — see `CONCEPTS.md` B28 for the trade-off and the revisit trigger.
 
 ## Indexing pipeline (the core of the product)
 
@@ -56,7 +61,7 @@ queued
   ▼
 cloning        git clone into worker storage; persist a `file` row per tracked path
   │            with its raw content
-  │            → FILE TREE USABLE FROM HERE
+  │            → FILE TREE SERVABLE FROM HERE (the UI still waits for `ready`)
   ▼
 parsing        walk every py/js/ts file; Tree-sitter per language
   │            extract: functions, classes, methods → SYMBOL TABLE
@@ -68,16 +73,16 @@ graphing       resolve what parsing extracted → dependency_edge (file → file
   ▼
 chunking       AST-aware chunks (by function/class, never fixed windows), each with
   │            its context prefix; content_tsv generates itself over embed_text
-  │            → LEXICAL SEARCH USABLE FROM HERE
+  │            → LEXICAL SEARCH + CHAT SERVABLE FROM HERE
   ▼
 embedding      embed each chunk's embed_text (text-embedding-3-small, 1536 dims) → pgvector
   │            ← the slow, network-bound stage. Deliberately last.
-  │            → FUSED LEXICAL + SEMANTIC SEARCH USABLE FROM HERE
+  │            → FUSED LEXICAL + SEMANTIC SEARCH SERVABLE FROM HERE
   ▼
-metrics        basic aggregates: file count, function count, total LOC,
-  │            language breakdown, largest files
+metrics        basic aggregates written as `metric` rows: file count, function
+  │            count, total LOC, language breakdown, largest files
   ▼
-ready          everything persisted; chat + dashboard unlock
+ready          everything persisted; the repo becomes openable in the UI
 ```
 
 **Why this order.** Everything deterministic and local (symbol table, graphs, chunks +
@@ -97,7 +102,8 @@ the slowest stage.
 
 On any failure in `cloning` through `chunking`: `status=failed`, store the error, surface a
 retry action — these stages are deterministic and local, so a failure means the repo really
-is broken.
+is broken. That retry is destructive by design: it deletes every `file` row and re-clones,
+because a broken index is not worth resuming from.
 
 **`embedding` is the one exception, deliberately.** It's the first stage that can fail for
 reasons that have nothing to do with the repo — a provider outage or a bad key, not a bug. A
@@ -106,6 +112,13 @@ stays exactly as searchable as it was (lexical still works, chat doesn't exist u
 and a later retry resumes via `WHERE embedding IS NULL` instead of needing a full re-index.
 Marking it `failed` would have made `retry_repository`'s existing cleanup delete every `File`
 row — cascading away every embedding already paid for — over a transient external error.
+
+Which is why the API offers a second, non-destructive restart: a repo parked at `embedding`
+or `metrics` re-runs only the pipeline's tail (`worker.tasks.resume_indexing` →
+`finalize_repository`), keeping every file, symbol, edge and chunk. The UI shows it as
+**Resume** rather than Retry, and only when the Redis index lock is *not* held — `status`
+records the furthest stage reached and cannot by itself tell "still embedding" from "stopped
+while embedding", so `GET /repos` reports the lock as `is_indexing`.
 
 ## Stage responsibilities
 
@@ -133,8 +146,16 @@ row — cascading away every embedding already paid for — over a transient ext
 - **embedding** — `core/ai`, `text-embedding-3-small` at 1536 dims, one request per page
   of 200 chunks. Resumable via `WHERE embedding IS NULL`. Skip by file `content_hash` so
   re-indexing unchanged files costs nothing. The only network-bound stage.
-- **metrics** — pure aggregation over already-extracted data; cheap to recompute.
-  V1 keeps this basic — counts, languages, largest files. No dead-code/complexity/etc.
+- **metrics** — `worker/metrics.py`. Five SQL aggregates over already-extracted data,
+  written as `metric` rows and read back by the dashboard, so a 36,000-file repo is counted
+  once at index time rather than on every dashboard poll. Sets `status = ready` — the only
+  place that does. V1 keeps this basic: counts, languages, largest files. No
+  dead-code/complexity/etc.
+
+  One honest limit: `file.language` and `file.loc` are only populated for the parsed
+  languages, so total LOC, the language breakdown and the largest-files list describe
+  **source** files. `file_count` reports both totals so the difference is visible rather
+  than silently swallowed.
 
 ## Re-indexing
 

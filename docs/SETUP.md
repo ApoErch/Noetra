@@ -58,6 +58,9 @@ LANGSMITH_API_KEY=
 LANGSMITH_PROJECT=noetra
 # app
 SESSION_SECRET=
+SESSION_MAX_AGE_SECONDS=1209600  # 14 days; the session cookie is signed, not server-side, so
+                                 # this is the real upper bound on a stolen cookie's life
+SESSION_HTTPS_ONLY=false         # MUST be true anywhere the app is served over TLS
 TOKEN_ENCRYPTION_KEY=          # Fernet key: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 CLONE_STORAGE_DIR=/data/repos  # where the worker clones repos
 # eval harness — a GitHub token that can read the private noetra repo (public eval repos need no auth)
@@ -114,6 +117,9 @@ docker compose exec worker python -m eval.agent --kinds graph --no-graph-tools #
 docker compose exec worker python -m eval.agent --tag y --model gpt-4.1-mini   # model A/B
 docker compose exec worker python -m eval.agent --limit 3 --fresh     # smoke test, 3 questions
 
+# repo metrics (M9) — written by the pipeline, so there is no command to recompute them:
+# re-import the repo, or hit Resume on one parked at embedding/metrics.
+
 # unit tests (pure — no DB, no LLM)
 cd backend && uv run pytest -q
 ```
@@ -133,6 +139,23 @@ trace named `agent_turn` — each `call_model`, each tool call with its argument
 token usage, and latency — tagged with `repository_id` in the metadata. The eval
 (`eval.agent`) is traced the same way, so a bad answer in the scoreboard can be opened and
 read step by step. Off by default; it adds a network call per span.
+
+## Sessions
+
+Login state is a **signed cookie**, not a server-side record: the whole session is
+`{"user_id": ...}`, signed with `SESSION_SECRET`. Logging out clears it, and Starlette sends
+back an expired cookie so the browser drops it.
+
+The consequence worth knowing: logout can only discard *that browser's* copy. There is no
+server-side store to revoke against, so a cookie captured beforehand stays valid until
+`SESSION_MAX_AGE_SECONDS` elapses. Closing that gap means a `session_version` column on
+`users`, bumped on logout and checked in `get_current_user` — deliberately not built in V1.
+Logout also does not revoke the stored GitHub token (imports must keep working) and cannot
+log the user out of github.com (OAuth, unlike OIDC, has no logout endpoint).
+
+Every session option is now passed explicitly in `api/main.py` rather than inherited from
+Starlette's defaults, because `https_only` is exactly the kind of setting that must not be
+silently `False` in production.
 
 ## Notes
 

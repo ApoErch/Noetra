@@ -13,9 +13,10 @@ again with better terms — the way a developer explores an unfamiliar codebase.
 
 - Log in with **GitHub OAuth**.
 - **Import a repository** — a public URL, or a private one using your own GitHub token.
-- Noetra clones it and indexes it in the background. As indexing progresses you get, in
-  order: a browsable **file tree**, **keyword search**, **semantic search**, then **AI
-  chat** and a basic **dashboard** (file/function counts, LOC, language breakdown).
+- Noetra clones it and indexes it in the background — clone, parse, graph, chunk, embed,
+  measure — showing you which stage it's on. When it finishes, the repo opens into a
+  workspace: a browsable **file tree**, **AI chat** over keyword + semantic search, and a
+  basic **dashboard** (file/function counts, LOC, language breakdown, largest files).
 - **Ask questions in chat.** The agent searches the code, reads files, follows imports,
   and answers with citations that link straight to the real file and line.
 

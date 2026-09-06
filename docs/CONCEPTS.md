@@ -786,3 +786,37 @@ fewer tokens, and LocAgent measured removing its graph tool at −4 points again
 removing keyword search. The graph is real and second-order. **What changes the answer:**
 nothing about the method; the bucket is n=12, so individual sub-rows (`requests`, n=4) are
 noise and only the headline delta should be quoted.
+
+### B28. One completion state, over progressive unlock
+**Chose:** the repo list's Open button is enabled only at `status = ready`. **Alternative:**
+the design the pipeline was built for — file tree openable from `parsing`, chat once chunks
+exist, dashboard at `ready` — with the workspace showing which surfaces are live. **Why:**
+the staged version was already shipped and it lied. `OPENABLE_STATUSES` let a user open a repo
+at `parsing`, where the Chat tab answers a 409 and the badge prints the raw enum string
+`graphing`, which tells nobody anything. Worse, chunks are written in a single commit at the
+*end* of the chunking stage, so `status = chunking` still means zero chunks and chat only
+really works from `embedding` onward — the status the UI keyed off and the capability it
+implied were a stage apart. Two ways out: make the workspace explain per-surface state, or
+present one completion state. The second is smaller, easier to explain, and impossible to get
+subtly wrong. **What it costs, honestly:** the pipeline's whole ordering rationale is that the
+network-bound embedding stage runs *last* so the product is usable minutes earlier; gating on
+`ready` spends that. The mitigation is to make the wait legible rather than shorter — the card
+shows the stage in words, its position in the pipeline, and a progress bar, all derived from
+the status enum's ordinal (no `progress` column). **What changes the answer:** a repo large
+enough that the wait becomes the product's worst moment. `isOpenable()` in
+`web/src/lib/repos.ts` is the only thing to change — the API never adopted this rule and still
+gates each surface on its own data.
+
+### B29. The index lock, not the status column, decides whether Resume is offered
+**Chose:** `GET /repos` reports `is_indexing` by reading the Redis index lock, and the UI
+offers Resume only when it is free. **Alternative:** offer Resume for any repo at
+`embedding`/`metrics` and let the API's 409 handle the rest. **Why:** `status` records the
+furthest stage a repo *reached*, never whether anything is still running — a repo actively
+embedding and a repo whose worker died mid-embedding are the same row. The lock is the only
+thing that already knows the difference, since `clone_repository` holds it for the task's
+whole life and releases it in a `finally`. Without this the Resume button would appear during
+every normal indexing run and 409 on click, which trains users to distrust the button. **What
+it costs:** one Redis `EXISTS` per repo per poll, and a UI that now depends on a Redis key
+rather than only on Postgres. **What changes the answer:** enough repos per user that the
+per-poll round trips matter, at which point the honest fix is a `started_at`/`heartbeat`
+column rather than more Redis reads.
