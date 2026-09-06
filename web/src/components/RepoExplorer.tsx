@@ -67,11 +67,10 @@ export function RepoExplorer({ repo, onBack }: Props) {
           title="Back to your repositories"
           className="flex items-center gap-2 rounded-lg px-1.5 py-1 transition hover:bg-zinc-900"
         >
-          <img src="/Logo.png" alt="Noetra" className="h-7 w-7 object-contain" />
-          <span className="text-lg font-semibold text-violet-400">Noetra</span>
+          <span className="text-2xl font-semibold text-violet-400">Noetra</span>
         </button>
         <span className="text-zinc-700">/</span>
-        <span className="text-base font-bold text-white">{displayName(repo.name)}</span>
+        <span className="text-xl font-bold text-white">{displayName(repo.name)}</span>
 
         <div className="ml-6 flex items-center gap-1.5">
           <TabButton active={tab === 'dashboard'} onClick={() => setTab('dashboard')}>
