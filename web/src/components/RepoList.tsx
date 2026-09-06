@@ -1,24 +1,11 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '../lib/api'
-
-export type Repo = {
-  id: string
-  github_url: string
-  name: string
-  status: string
-  error_message: string | null
-}
-
-// File tree + lexical search need cloning to have *finished*, not just
-// started — worker/tasks.py sets status=CLONING before the clone even runs
-// and doesn't commit any `file` rows until that whole stage completes, so
-// "cloning" itself must stay non-openable or a big repo shows an empty tree.
-const OPENABLE_STATUSES = new Set(['parsing', 'graphing', 'chunking', 'embedding', 'metrics', 'ready'])
+import { describeStatus, displayName, isOpenable, retryAction, stageProgress, type Repo, type RepoStatus } from '../lib/repos'
 
 // Each pipeline stage gets its own hue (in pipeline order) so the badge
 // itself communicates progress, not just "still working" vs. "done".
-const STATUS_STYLES: Record<string, string> = {
+const STATUS_STYLES: Record<RepoStatus, string> = {
   queued: 'bg-zinc-800 text-zinc-300 ring-zinc-700',
   cloning: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
   parsing: 'bg-blue-500/10 text-blue-400 ring-blue-500/20',
@@ -30,16 +17,28 @@ const STATUS_STYLES: Record<string, string> = {
   failed: 'bg-red-500/10 text-red-400 ring-red-500/20',
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const style = STATUS_STYLES[status] ?? STATUS_STYLES.queued
+function StatusBadge({ repo }: { repo: Repo }) {
+  const style = STATUS_STYLES[repo.status] ?? STATUS_STYLES.queued
   return (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${style}`}>
-      {status}
+      {describeStatus(repo)}
     </span>
   )
 }
 
-/** Minimal repo picker: paste a GitHub URL to import, see status, open a ready repo's file tree. */
+/** A thin bar filling as the repo moves through the pipeline — the wait is long enough to need one. */
+function StageProgress({ repo }: { repo: Repo }) {
+  return (
+    <div className="mt-2 h-0.5 w-full overflow-hidden rounded-full bg-zinc-800">
+      <div
+        className={`h-full rounded-full transition-all duration-500 ${repo.is_indexing ? 'bg-indigo-500' : 'bg-zinc-600'}`}
+        style={{ width: `${Math.round(stageProgress(repo.status) * 100)}%` }}
+      />
+    </div>
+  )
+}
+
+/** Minimal repo picker: paste a GitHub URL to import, watch it index, open it once it's ready. */
 export function RepoList({ onOpen }: { onOpen: (repo: Repo) => void }) {
   const [url, setUrl] = useState('')
   const queryClient = useQueryClient()
@@ -76,7 +75,7 @@ export function RepoList({ onOpen }: { onOpen: (repo: Repo) => void }) {
   return (
     <div className="mx-auto w-full max-w-3xl px-4 py-10">
       <h2 className="text-xl font-semibold tracking-tight text-white">Your repositories</h2>
-      <p className="mt-1 text-sm text-zinc-400">Import a public or private GitHub repo to browse its files.</p>
+      <p className="mt-1 text-sm text-zinc-400">Import a public or private GitHub repo to browse and chat with it.</p>
 
       <form
         onSubmit={(e) => {
@@ -110,29 +109,31 @@ export function RepoList({ onOpen }: { onOpen: (repo: Repo) => void }) {
               No repositories yet — import one above to get started.
             </li>
           )}
-          {repos?.map((repo) => (
-            <li
-              key={repo.id}
-              className="rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 shadow-sm transition hover:border-zinc-700"
-            >
-              <div className="flex items-center justify-between gap-4">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-white">{repo.name}</p>
-                  <div className="mt-1">
-                    <StatusBadge status={repo.status} />
+          {repos?.map((repo) => {
+            const restart = retryAction(repo)
+            return (
+              <li
+                key={repo.id}
+                className="rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 shadow-sm transition hover:border-zinc-700"
+              >
+                <div className="flex items-center justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-white">{displayName(repo.name)}</p>
+                    <div className="mt-1">
+                      <StatusBadge repo={repo} />
+                    </div>
+                    {repo.status !== 'ready' && repo.status !== 'failed' && <StageProgress repo={repo} />}
                   </div>
-                </div>
-                <div className="flex shrink-0 gap-2">
-                  {repo.status === 'failed' && (
-                    <button
-                      onClick={() => retryRepo.mutate(repo.id)}
-                      disabled={retryRepo.isPending}
-                      className="rounded-md bg-zinc-800 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition hover:bg-zinc-700 disabled:opacity-40"
-                    >
-                      Retry
-                    </button>
-                  )}
-                  {(repo.status === 'failed' || OPENABLE_STATUSES.has(repo.status)) && (
+                  <div className="flex shrink-0 gap-2">
+                    {restart && (
+                      <button
+                        onClick={() => retryRepo.mutate(repo.id)}
+                        disabled={retryRepo.isPending}
+                        className="rounded-md bg-zinc-800 px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition hover:bg-zinc-700 disabled:opacity-40"
+                      >
+                        {restart === 'retry' ? 'Retry' : 'Resume'}
+                      </button>
+                    )}
                     <button
                       onClick={() => removeRepo.mutate(repo.id)}
                       disabled={removeRepo.isPending}
@@ -140,23 +141,24 @@ export function RepoList({ onOpen }: { onOpen: (repo: Repo) => void }) {
                     >
                       Remove
                     </button>
-                  )}
-                  <button
-                    onClick={() => onOpen(repo)}
-                    disabled={!OPENABLE_STATUSES.has(repo.status)}
-                    className="rounded-md bg-indigo-600 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-30"
-                  >
-                    Open
-                  </button>
+                    <button
+                      onClick={() => onOpen(repo)}
+                      disabled={!isOpenable(repo.status)}
+                      title={isOpenable(repo.status) ? undefined : 'Available once indexing finishes'}
+                      className="rounded-md bg-indigo-600 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-30"
+                    >
+                      Open
+                    </button>
+                  </div>
                 </div>
-              </div>
-              {repo.status === 'failed' && repo.error_message && (
-                <p className="mt-2 truncate text-xs text-red-400" title={repo.error_message}>
-                  {repo.error_message}
-                </p>
-              )}
-            </li>
-          ))}
+                {repo.status === 'failed' && repo.error_message && (
+                  <p className="mt-2 truncate text-xs text-red-400" title={repo.error_message}>
+                    {repo.error_message}
+                  </p>
+                )}
+              </li>
+            )
+          })}
         </ul>
       )}
     </div>

@@ -112,6 +112,10 @@ class File(Base):
     __table_args__ = (
         UniqueConstraint("repository_id", "path", name="uq_files_repository_id_path"),
         Index("ix_files_repository_id_content_hash", "repository_id", "content_hash"),
+        # Declared here, not only in the migration that created it: autogenerate compares the
+        # model against the live database, so an index the model doesn't mention reads as one
+        # nobody asked for, and every later autogenerate proposes dropping it.
+        Index("ix_files_content_tsv", "content_tsv", postgresql_using="gin"),
     )
 
 
@@ -157,6 +161,8 @@ class Chunk(Base):
     """
 
     __tablename__ = "chunks"
+    # The lexical-search index. Declared for the same reason as files.content_tsv's above.
+    __table_args__ = (Index("ix_chunks_content_tsv", "content_tsv", postgresql_using="gin"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     repository_id: Mapped[uuid.UUID] = mapped_column(
@@ -254,6 +260,29 @@ class ReferenceEdge(Base):
     )
     line: Mapped[int] = mapped_column(Integer)  # the call site, so a citation can point at it
     confidence: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Metric(Base):
+    """One aggregate about an indexed repo, keyed by name with a JSON payload (see docs/DATA_MODEL.md).
+
+    Written once by the `metrics` pipeline stage and read by the dashboard, so the numbers
+    describe the indexed snapshot rather than being recounted on every page load — a repo
+    with tens of thousands of files would otherwise re-aggregate on every poll.
+
+    `value` is JSONB so the five V1 keys and any later one share a single table with no
+    migration: a scalar count is stored as an object, a breakdown as a list.
+    """
+
+    __tablename__ = "metrics"
+    __table_args__ = (UniqueConstraint("repository_id", "key", name="uq_metrics_repository_id_key"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), index=True
+    )
+    key: Mapped[str] = mapped_column(String)
+    value: Mapped[Any] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

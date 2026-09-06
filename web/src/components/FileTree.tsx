@@ -9,11 +9,20 @@ type Props = {
 
 /** File tree sidebar: blue folder icons, chevrons, flat per-depth indent, left-accent bar on the selected file. */
 export function FileTree({ nodes, selectedFileId, onSelectFile }: Props) {
+  // Folders sort before files at every level (see lib/tree.ts), so at the root the two groups
+  // are already contiguous — a thin divider between them is enough to read as two sections.
+  const folders = nodes.filter((n) => n.type === 'folder')
+  const files = nodes.filter((n) => n.type === 'file')
+
   return (
     <div>
-      <div className="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Files</div>
+      <div className="px-4 py-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Files</div>
       <div className="pb-2 text-[13px]">
-        {nodes.map((node) => (
+        {folders.map((node) => (
+          <FileTreeNode key={node.path} node={node} depth={0} selectedFileId={selectedFileId} onSelectFile={onSelectFile} />
+        ))}
+        {folders.length > 0 && files.length > 0 && <div className="mx-4 my-2 border-t border-zinc-800" />}
+        {files.map((node) => (
           <FileTreeNode key={node.path} node={node} depth={0} selectedFileId={selectedFileId} onSelectFile={onSelectFile} />
         ))}
       </div>
@@ -38,11 +47,14 @@ function FileTreeNode({ node, depth, selectedFileId, onSelectFile }: NodeProps) 
       <div
         onClick={() => onSelectFile(node)}
         style={{ paddingLeft }}
-        className={`relative flex cursor-pointer items-center gap-2 py-1.5 pr-3 transition ${
+        className={`relative flex cursor-pointer items-center gap-2 py-2 pr-3 transition ${
           isSelected ? 'bg-zinc-800 font-medium text-white' : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
         }`}
       >
         {isSelected && <span className="absolute inset-y-0 left-0 w-0.5 bg-indigo-500" />}
+        {/* Same width as the folder row's chevron, so file names line up with folder names
+            at the same depth instead of sitting one icon further left. */}
+        <span className="w-3 shrink-0" />
         <span className="shrink-0">
           <FileTypeIcon name={node.name} />
         </span>
@@ -56,9 +68,9 @@ function FileTreeNode({ node, depth, selectedFileId, onSelectFile }: NodeProps) 
       <div
         onClick={() => setOpen(!open)}
         style={{ paddingLeft }}
-        className="flex cursor-pointer select-none items-center gap-2 py-1.5 pr-3 text-zinc-300 transition hover:bg-zinc-900 hover:text-white"
+        className="flex cursor-pointer select-none items-center gap-2 py-2 pr-3 text-zinc-300 transition hover:bg-zinc-900 hover:text-white"
       >
-        <span className={`shrink-0 text-zinc-500 transition-transform ${open ? 'rotate-90' : ''}`}>
+        <span className={`w-3 shrink-0 text-zinc-500 transition-transform ${open ? 'rotate-90' : ''}`}>
           <ChevronIcon />
         </span>
         <span className="shrink-0 text-blue-400">

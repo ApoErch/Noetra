@@ -23,11 +23,15 @@ PostgreSQL + `pgvector`. SQLAlchemy models in `core/models.py`. Everything scope
 | source | enum | `github_public` \| `github_private` \|
 | full_name | text | e.g. `microsoft/vscode` |
 | clone_url | text |
-| status | enum | `queued\|cloning\|parsing\|graphing\|chunking\|embedding\|metrics\|ready\|failed` (advanced in that order — see `WORKFLOW.md`) |
-| progress | int | 0–100 |
-| error | text | nullable |
-| indexed_at | timestamptz | nullable |
-| created_at | timestamptz | |
+| status | enum | `queued\|cloning\|parsing\|graphing\|chunking\|embedding\|metrics\|ready\|failed` (advanced in that order — see `WORKFLOW.md`). All nine values were created in the initial `repository_status` type, so the M9 metrics stage needed no enum migration to start using the last two. `ready` is set in exactly one place: `worker/metrics.py` |
+| error_message | text | nullable |
+| created_at / updated_at | timestamptz | `updated_at` moves on every status write, which is also what invalidates the repo-map cache |
+
+**No `progress` column, deliberately.** An earlier draft of this table specified `progress`
+(0–100) and `indexed_at`; neither was ever built and neither is needed. The UI's step counter
+and progress bar are the status value's *index* in the pipeline order
+(`web/src/lib/repos.ts`), which answers the same question without a column that every stage
+would have to remember to update.
 
 ### file
 | field | type | notes |
@@ -108,13 +112,38 @@ deliberately does not. A call site with no enclosing entity (a module-level
 | line | int | the call site, for citations |
 | confidence | float | resolution tier: 0.9 same file · 0.85 imported file · 0.7 unique repo-wide. Ambiguous names write no row at all. Tools filter at `≥ 0.5`, which excludes nothing today — it is the contract that lets a weaker tier be added later without every caller silently inheriting its guesses. |
 
-### metric  *(basic only in V1; jsonb so new metrics need no migration)*
+### metric  *(the dashboard's aggregates — M9, shipped 2026-09-06)*
+
+Written once by the `metrics` pipeline stage (`worker/metrics.py`), read by
+`GET /repos/{id}/metrics`. Computed at index time rather than per request because they
+describe the *indexed snapshot*: a 36,000-file repo would otherwise re-aggregate on every
+dashboard poll. Rewritten wholesale on a re-index (delete-then-insert), so a key that stops
+being produced cannot linger as a stale row.
+
+`value` is jsonb precisely so the five V1 keys and any later one share one table with no
+migration — a count is stored as an object, a breakdown as a list.
+
 | field | type | notes |
 |-------|------|-------|
 | id | uuid (pk) | |
-| repository_id | uuid (fk) | |
+| repository_id | uuid (fk, cascade) | unique together with `key` |
 | key | text | `file_count\|function_count\|total_loc\|language_breakdown\|largest_files` |
 | value | jsonb | payload |
+
+**Three of the five describe source files only, and say so.** `file.language` and `file.loc`
+are populated in one place (`worker/indexing.py`) and only for py/js/ts, so `total_loc`,
+`language_breakdown` and `largest_files` exclude Markdown, JSON, config and binaries.
+`file_count` therefore reports `{total, source}` rather than one number — the gap between
+them is the part the other three cannot see, and hiding it would make the dashboard quietly
+wrong rather than merely narrow.
+
+| key | value |
+|---|---|
+| `file_count` | `{"total": n, "source": n}` |
+| `function_count` | `{"function": n, "class": n, "method": n}` — zero-filled, so a repo with no classes reports 0 rather than omitting the key |
+| `total_loc` | `{"source_loc": n}` |
+| `language_breakdown` | `[{language, files, loc}]`, ordered by loc desc; the null-language group is dropped, not rendered as a bucket |
+| `largest_files` | `[{path, loc}]`, top 10. No language field — the frontend derives one from the path, and `loc` is only ever set alongside `language` |
 
 ### chat_conversation  *(one chat thread: user × repository — the agent's memory scope)*
 | field | type | notes |
@@ -172,6 +201,7 @@ staging is what the build order in `CLAUDE.md` rests on.
 | `file(repository_id, content_hash)` | incremental re-index | **M4** |
 | GIN on `chunk.content_tsv` | lexical retrieval over chunks (what `search()` actually uses) | **M5** |
 | `reference_edge(repository_id, to_entity_id)` | `find_references(direction="callers")` — the reverse direction, which is the one that needs the index; the forward direction is served by the `from_entity_id` FK index | **M8** ✅ |
+| `metric(repository_id)` + unique `(repository_id, key)` | the dashboard reads all five rows for one repo; the unique constraint is what makes "one row per key" a schema rule rather than a convention | **M9** ✅ |
 
 **No vector index in V1 (deferred, not forgotten).** `chunk.embedding` has no HNSW/IVFFlat
 index — `semantic_search()` does an exact `<=>` cosine scan. Two reasons: the per-file cap

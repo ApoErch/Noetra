@@ -35,10 +35,11 @@ def upgrade() -> None:
     )
     op.create_index(op.f('ix_dependency_edges_repository_id'), 'dependency_edges', ['repository_id'], unique=False)
     # NOTE: autogenerate also proposed dropping ix_code_entities_name_trgm and
-    # ix_files_content_tsv here — both real indexes, just invisible to the
-    # model diff because they were created by hand (raw SQL, not a SQLAlchemy
-    # Index()) in the prior migration for their non-default GIN operator
-    # classes. Deliberately not touching them in this migration.
+    # ix_files_content_tsv here — both real indexes. The reason given at the time
+    # ("invisible to the model diff") was wrong: they were proposed for removal because
+    # the models never declared them, which reads as "an index nobody asked for".
+    # ix_files_content_tsv is declared as of M9; ix_code_entities_name_trgm was dropped
+    # outright in 7a96b345a5d0. Deliberately not touching either in this migration.
     # ### end Alembic commands ###
 
 

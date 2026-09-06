@@ -10,10 +10,18 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
 ## 2. Import
 - Two sources: public GitHub URL, private repo via OAuth.
 - Creates `repository(status=queued)` and enqueues a Celery indexing job.
-- UI shows live indexing status/progress until `ready`.
+- UI shows live indexing status until `ready`: the stage in words, a step counter, and a
+  progress bar derived from the stage's position in the pipeline (there is no `progress`
+  column — the ordinal answers the same question for free).
+- Two recovery paths, and they are not the same operation. **Retry** on a `failed` repo
+  deletes its files and re-clones. **Resume** on a repo that stopped at `embedding`/`metrics`
+  re-runs only the pipeline's tail and keeps the index it already paid for. Resume is offered
+  only when no job holds the repo's Redis index lock (`is_indexing` on `GET /repos`).
+- A repo can be removed at any status, including while it is still `queued` or `cloning`.
 
 ## 3. File tree browser
-- Available as soon as `status` passes `cloning` — doesn't wait on parsing/chunking/embedding.
+- Served by the API as soon as `status` passes `cloning`, but reached through the repo
+  workspace, which opens at `ready` (`WORKFLOW.md`, `CONCEPTS.md` B28).
 - VS Code-style sidebar: nested tree built client-side from a flat list of `file.path`
   (`GET /repos/{id}/files`, paths only, no content — cheap even at tens of thousands of files).
 - Click a file → lazy-fetch its content (`GET /repos/{id}/files/{file_id}`) and open in Monaco.
@@ -52,8 +60,9 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
 - **Conversations persist**: `chat_conversation` + `chat_message` (own tables, not a
   LangGraph checkpointer — `CONCEPTS.md` B22). Each turn replays only the last 12
   user/assistant messages, never old tool results. New chat / switch / delete in the panel.
-- Chat unlocks once `chunking` has finished (the agent works lexical-only until embeddings
-  exist); it never waits for `ready`.
+- The endpoint unlocks once `chunking` has finished — it gates on "does this repo have
+  chunks", never on `status`, so the agent works lexical-only until embeddings exist. The
+  chat *tab* is nonetheless reached through a workspace that opens at `ready`.
 - Planned-then-dropped: a CRAG-style retrieval-grade node and an on/off-topic router node —
   see `RETRIEVAL.md` for the evidence and `CONCEPTS.md` B21 for the revisit triggers.
 
@@ -67,12 +76,19 @@ Each V1 surface, what it does, what it needs from the backend. V2 non-goals at t
   replaced them as the user-facing surface, and `eval/run.py` calls `search()` directly. The
   retrieval module is unchanged; only its caller moved.
 
-## 6. Repository dashboard  *(basic metrics only)*
-- Header counts: file count, function count, total LOC.
-- Language breakdown (python / js / ts).
-- Largest files.
-- Data comes from `repository` + the `metric` rows. **Nothing beyond these in V1** —
-  no complexity, dead code, duplicates, ownership, or health score.
+## 6. Repository dashboard  *(basic metrics only; shipped in milestone 9)*
+- A tab in the repo workspace, next to Chat. Stat tiles: files (total, and how many are
+  source), functions (with the method count), classes, and total lines of code.
+- Language breakdown (python / js / ts) as a share-of-lines bar with a labelled legend.
+- Largest source files, ranked, each clickable straight into the Monaco overlay.
+- **The numbers say "source" where they mean source.** `file.language` and `file.loc` are
+  only populated for the parsed languages, so LOC, the breakdown and the largest-files list
+  exclude Markdown, JSON, config and binaries — which `file_count.total` does count. Showing
+  both totals is the difference between a caveat and a wrong number.
+- Data comes from the `metric` rows written by the pipeline's `metrics` stage, not from a
+  count run per request — a 36,000-file repo would otherwise re-aggregate on every poll.
+- **Nothing beyond these in V1** — no complexity, dead code, duplicates, ownership, or
+  health score.
 
 ---
 

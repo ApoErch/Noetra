@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from celery.utils.log import get_task_logger
+from sqlalchemy.orm import Session
 
 from core.celery_app import celery_app
 from core.config import get_settings
@@ -14,6 +15,7 @@ from core.redis_client import release_index_lock
 from core.security import decrypt_token
 from worker.embedding import embed_repository
 from worker.indexing import index_repository_files
+from worker.metrics import compute_metrics
 
 CLONE_TIMEOUT_SECONDS = 300
 
@@ -21,6 +23,34 @@ CLONE_TIMEOUT_SECONDS = 300
 # way to log from inside a task — it nests under Celery's own logger so these lines
 # inherit the worker's --loglevel and log formatting instead of needing separate setup.
 logger = get_task_logger(__name__)
+
+
+def finalize_repository(db: Session, repo: Repository) -> None:
+    """Run the pipeline's tail — embed every unembedded chunk, then compute metrics and mark the repo READY.
+
+    Shared by the initial clone and by `resume_indexing`, so a resumed repo finishes through
+    exactly the same code path as a fresh one.
+
+    Embedding is the first stage that can fail for reasons that are not the repo's fault (a
+    provider outage, a bad API key) rather than something really wrong with the repo. Every
+    earlier stage is deterministic and local, so letting an exception mark the repo FAILED is
+    correct there — it would not be correct here, since it would brick a repo that is already
+    fully chunked and perfectly lexically searchable. So: catch it, log it, and return with
+    status left at EMBEDDING. `WHERE embedding IS NULL` makes the retry resumable, and
+    search() gates the semantic leg on having embedded chunks rather than on status, so
+    lexical search keeps working either way.
+
+    Metrics is deliberately not reached in that case: READY means "everything unlocked", and
+    a repo whose vectors are missing has not earned it.
+    """
+    try:
+        embed_repository(db, repo)
+    except Exception:
+        db.rollback()
+        logger.exception("repo %s: embedding stage failed, leaving status=EMBEDDING", repo.id)
+        return
+
+    compute_metrics(db, repo)
 
 
 @celery_app.task
@@ -101,27 +131,11 @@ def clone_repository(repository_id: str) -> None:
 
         # Everything from here — file walk, parsing, graphing, chunking, and the
         # matching status transitions — is the shared indexing core, so the eval
-        # seed indexes repos through the exact same code path. Metrics doesn't
-        # exist yet, so status stops advancing after embedding rather than
-        # jumping to READY, which is reserved for "chat + full hybrid search +
-        # metrics all unlocked" (docs/WORKFLOW.md).
+        # seed indexes repos through the exact same code path. The eval seed stops
+        # there; only the production task runs the tail below, which is what
+        # finally advances a repo to READY.
         index_repository_files(db, repo, dest)
-
-        # Embedding is the first stage that can fail for reasons that are not the
-        # repo's fault (a provider outage, a bad API key) rather than something really
-        # wrong with the repo. Every earlier stage is deterministic and local, so
-        # letting its exception hit the `except` below and mark the repo FAILED is
-        # correct there — it would not be correct here, since it would brick a
-        # repo that is already fully chunked and perfectly lexically searchable.
-        # So: catch it, log it, leave status=EMBEDDING (set at entry to
-        # embed_repository) rather than re-raising. `WHERE embedding IS NULL`
-        # makes a retry resumable, and search() gates the semantic leg on having
-        # embedded chunks, not on status, so lexical search keeps working either way.
-        try:
-            embed_repository(db, repo)
-        except Exception:
-            db.rollback()
-            logger.exception("repo %s: embedding stage failed, leaving status=EMBEDDING", repository_id)
+        finalize_repository(db, repo)
 
         logger.info("repo %s: full pipeline took %.2fs", repository_id, time.perf_counter() - task_start)
     except Exception as exc:
@@ -131,6 +145,30 @@ def clone_repository(repository_id: str) -> None:
             repo.error_message = str(exc)
             db.commit()
         raise
+    finally:
+        db.close()
+        release_index_lock(repository_id)
+
+
+@celery_app.task
+def resume_indexing(repository_id: str) -> None:
+    """Re-run the pipeline's tail for a repo parked at `embedding`/`metrics` — no re-clone, nothing deleted.
+
+    The recovery path for a repo whose embedding stage was interrupted by a provider outage
+    or a killed worker. Distinct from `clone_repository`, which the API's retry uses for a
+    FAILED repo: that one wipes every `File` row and starts over, which would throw away a
+    perfectly good index here.
+
+    A failure is logged and re-raised *without* touching `status`, so the repo stays where it
+    was and stays resumable — marking it FAILED would make the next retry eligible for that
+    bulk delete.
+    """
+    db = SessionLocal()
+    try:
+        repo = db.get(Repository, repository_id)
+        if repo is None:
+            return
+        finalize_repository(db, repo)
     finally:
         db.close()
         release_index_lock(repository_id)

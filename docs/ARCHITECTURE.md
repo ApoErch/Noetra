@@ -29,12 +29,14 @@
 
 ## Components
 
-**web** — React SPA. Talks only to the REST API. Owns dashboard, chat, search, Monaco
-viewer. Watches repository status while indexing runs.
+**web** — React SPA. Talks only to the REST API. Owns the repo list, the repo workspace
+(chat + dashboard tabs, file tree, Monaco overlay). Polls repository status while indexing
+runs, and opens a repo only once it is `ready`.
 
-**api** — FastAPI. Stateless request layer: auth, repo CRUD, serves indexed data, runs
-the `/search` endpoint via `core/retrieval`, and hosts the **LangGraph agent** for chat
-(streamed over SSE). Enqueues indexing jobs; never does heavy work inline.
+**api** — FastAPI. Stateless request layer: auth, repo CRUD, serves indexed data
+(file tree, file content, dashboard metrics), and hosts the **LangGraph agent** for chat
+(streamed over SSE). Retrieval is reached only through the agent's tools — there is no
+`/search` endpoint since M7. Enqueues indexing jobs; never does heavy work inline.
 
 The agent living in `api` rather than `worker` is deliberate: a chat turn is
 **interactive** (the user is watching tokens stream) while everything in `worker` is
@@ -43,13 +45,18 @@ would mean polling for an answer that should be streaming. The "no slow work in 
 is really "no *repo-touching* work in `api`" — the agent only reads the DB.
 
 **worker** — Celery. Owns the indexing pipeline (`WORKFLOW.md`): clone, parse, graph,
-chunk, embed, compute basic metrics. Long-running, horizontally scalable.
+chunk, embed, compute basic metrics, mark ready. Long-running, horizontally scalable. Two
+entry points: `clone_repository` for a full index, and `resume_indexing` for a repo that
+stopped part-way through the tail — both end in the same `finalize_repository`.
 
 **PostgreSQL (+ pgvector)** — single source of truth: users, repositories, files,
 code entities (symbol table), chunks + embeddings, dependency + reference edges, metrics.
 pgvector keeps embeddings in the same DB — no second datastore in V1.
 
-**Redis** — Celery broker + task status/progress. Optional cache for dashboard reads.
+**Redis** — Celery broker, plus the per-repo index lock. That lock does double duty: it
+stops two indexing jobs racing on the same repo, and — because it is held for exactly as long
+as a job runs — it is also the API's answer to "is this repo actually being worked on right
+now", which `status` alone cannot tell (`CONCEPTS.md` B29).
 
 ## Shared logic (`core` + `indexer`)
 
@@ -75,7 +82,8 @@ pgvector keeps embeddings in the same DB — no second datastore in V1.
 
 ## Data flow
 
-- **Read (dashboard / search):** web → api → Postgres (via retrieval) → web.
+- **Read (file tree / dashboard):** web → api → Postgres → web. Dashboard numbers are read
+  from `metric` rows the pipeline already wrote, never aggregated per request.
 - **Import:** web → api creates `Repository(status=queued)` → enqueues Celery job →
   returns immediately. web watches status.
 - **Indexing:** worker consumes the job, advances status per stage, writes results,

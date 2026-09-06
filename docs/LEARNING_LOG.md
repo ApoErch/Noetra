@@ -253,3 +253,45 @@ zod had 3 import edges for 1,411 entities, twice written off as "monorepo aliase
 TypeScript importing the emitted `./util.js` path for a `util.ts` source. One fix took it to
 405, which had been quietly degrading the import tool and the repo map for every TypeScript
 repo since M4.
+
+---
+
+## Milestone 9 — Metrics, dashboard, and one completion state
+
+**Built:** A `metrics` pipeline stage (`worker/metrics.py`) that runs five SQL aggregates
+into a `metric` table and sets `status = READY` — the only place in the codebase that does,
+so the pipeline finally terminates where it always claimed to. `GET /repos/{id}/metrics`
+feeds a Dashboard tab beside Chat in the repo workspace: stat tiles, a share-of-lines
+language bar, and a ranked largest-files list that clicks through to the code. The repo list
+now gates Open on `ready` and shows the stage, the step number and a progress bar while it
+waits, with two different restart buttons behind it.
+
+**Core concept(s):** (1) *Materialise an aggregate when it describes a snapshot* — the
+numbers cannot change until the repo is re-indexed, so counting once at index time and
+reading five rows beats re-aggregating 36,000 files on every dashboard poll. (2) *A status
+column records a stage reached, not work in progress* — "embedding" and "died while
+embedding" are the same row, and only the Redis job lock can tell them apart. (3) *A metric
+that quietly narrows its own denominator is worse than a missing one* — `loc` exists only
+for parsed languages, so the dashboard says "source" everywhere it means source and reports
+total and source file counts side by side.
+
+**Recruiter-ready explanation:** The dashboard shows how big a repository is: how many files
+and functions, how many lines, which languages, and which files are the largest. All of it is
+counted once when the repo is indexed and stored, rather than recounted every time someone
+opens the page — the numbers can't change in between, so recounting would be pure waste. This
+is also the milestone where indexing finally has an end: before it, a repo stopped at
+"embedding" forever, because nothing in the code ever marked one finished.
+
+**Tricky part:** Gating the Open button on "ready" was a one-line change that broke every
+repo in the database. Nothing had ever set `READY`, so every existing repo sat at
+`embedding` and would have become permanently unopenable — a UI rule silently depending on a
+backend state that had never once been reached. The fix had to be a *second* kind of restart,
+because the one that existed deletes every file row and re-clones: correct for a repo that
+genuinely failed, catastrophic for one whose only problem was a provider timeout during
+embedding. So restart split in two — Retry wipes and re-clones, Resume re-runs just the
+pipeline's tail — and deciding which to offer turned out to need something the database
+doesn't know. `status` says how far a repo got, never whether a worker is still running, so a
+repo actively embedding looks exactly like one that stopped. The Redis index lock already
+held that answer, since the task takes it for its whole life and releases it in a `finally`;
+the repo list now surfaces it as `is_indexing`. Without that, the Resume button would have
+appeared during every normal indexing run and failed on click.
