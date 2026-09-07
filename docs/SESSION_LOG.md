@@ -660,3 +660,30 @@ work in `DEPLOYMENT.md` (Terraform + EC2, nothing built yet) or the M7 eval cave
   but the Write tool is safer for TSX.
 - Docker services (`db`, `redis`, `api`, `worker`) left running; the frontend dev server was
   never started.
+
+---
+
+## Session — 2026-09-07 02:05
+
+**Worked on:** The Noetra logo mark as a real 3D object, on the `polish` branch. Frontend
+polish, not a milestone — no backend or retrieval code was touched.
+**Done:** New `web/src/components/NoetraLogo/` (8 files, ~1,800 lines): the "N" as a signed
+distance field, filled with Poisson-disc particles plus a contour ring and outer halo,
+connected by nearest-neighbour edges, animated by a trace wavefront in a custom vertex shader
+and finished with a hand-written bloom + chromatic-fringe pass that keeps the canvas
+transparent. `three` and `leva` added; the Leva panel is lazily imported so it never reaches
+production. Committed as `259f59c`, `689bea3`, `af2c896`.
+**In progress:** Nothing half-built. `web/public/Logo.png` is deleted, the favicon now uses the
+existing `favicon.svg`, and the no-WebGL fallback draws a wordmark instead of loading an image.
+**Key decisions:** The mark shows on the login page only — the repo-list and workspace headers
+keep just the wordmark, at a larger size. The volumetric solid fill and auto-orbit were built
+and then deleted at the user's request; all palette stops are one violet.
+**Next step:** Nothing outstanding on the logo. Back to `DEPLOYMENT.md` (Terraform + EC2,
+nothing built) or the M7 eval caveats in `RETRIEVAL.md`.
+**Watch out for:** `three` adds **+146 KB gzip** and sits in the main chunk, so it blocks the
+login page's first paint — measured by building with and without it (120 KB → 266 KB gzip).
+Lazy-loading the component is the fix if that ever matters; deliberately not done. The `?logo`
+route at the top of `App.tsx` is a three-line dev escape hatch to delete when the mark settles.
+Sizing is two separate things: the container class (`h-[70vmin]` on `App.tsx:110`) sets how big
+it is, `params.zoom` only sets how much of that box it fills, and above ~0.78 the halo and the
+trace pulse start clipping. `sdf.ts:7` still cites `NoetraLogo.png`, which no longer exists.
