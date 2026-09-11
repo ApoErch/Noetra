@@ -60,3 +60,5 @@ Languages at launch: Python, JavaScript, TypeScript. Nothing else.
 - Session-to-session handoff (written by `/endsession`): @docs/SESSION_LOG.md
 - Problems we hit + design decisions, interview-oriented (not auto-loaded — read on demand,
   appended by `/endsession`): `docs/CONCEPTS.md`
+- Self-hosted model serving + fine-tuning track, not part of V1 (not auto-loaded — read on
+  demand): `docs/MODELSERVING.md`
